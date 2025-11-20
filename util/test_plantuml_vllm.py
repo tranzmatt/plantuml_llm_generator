@@ -14,7 +14,7 @@ def test_basic_inference(args):
     print("\n" + "=" * 70)
     print("Test 1: Basic vLLM Inference")
     print("=" * 70)
-    
+
     sampling = SamplingParams(
         temperature=0.0,
         top_p=1.0,
@@ -22,11 +22,11 @@ def test_basic_inference(args):
         max_tokens=512,
         repetition_penalty=1.1,
     )
-    
+
     print(f"Loading model: {args.model}")
     print(f"Using {args.tp} GPUs")
     print("(This may take 1-2 minutes...)")
-    
+
     try:
         llm = LLM(
             model=args.model,
@@ -39,9 +39,9 @@ def test_basic_inference(args):
     except Exception as e:
         print(f"✗ Failed to load model: {e}")
         return False
-    
+
     test_prompt = "You are a helpful assistant. Say hello and confirm you are working."
-    
+
     print("\nRunning inference...")
     try:
         outputs = llm.generate([test_prompt], sampling)
@@ -51,7 +51,7 @@ def test_basic_inference(args):
     except Exception as e:
         print(f"✗ Inference failed: {e}")
         return False
-    
+
     return True
 
 
@@ -60,7 +60,7 @@ def test_plantuml_generation(args):
     print("\n" + "=" * 70)
     print("Test 2: PlantUML Diagram Generation")
     print("=" * 70)
-    
+
     sampling = SamplingParams(
         temperature=0.0,
         top_p=1.0,
@@ -68,9 +68,9 @@ def test_plantuml_generation(args):
         max_tokens=1024,
         repetition_penalty=1.1,
     )
-    
+
     print(f"Loading model: {args.model}")
-    
+
     try:
         llm = LLM(
             model=args.model,
@@ -82,7 +82,7 @@ def test_plantuml_generation(args):
     except Exception as e:
         print(f"✗ Failed to load model: {e}")
         return False
-    
+
     plantuml_prompt = """You are a PlantUML generator. Create ONLY valid PlantUML syntax.
 
 Generate a simple class diagram for this Python code:
@@ -100,27 +100,27 @@ class UserService:
 
 Output ONLY the PlantUML code, starting with @startuml and ending with @enduml.
 """
-    
+
     print("Generating PlantUML diagram...")
     try:
         outputs = llm.generate([plantuml_prompt], sampling)
         response = outputs[0].outputs[0].text
         print("✓ Generation successful!")
-        
+
         if "@startuml" in response and "@enduml" in response:
             print("✓ Valid PlantUML structure detected")
         else:
             print("⚠ Warning: Missing @startuml/@enduml tags")
-        
+
         print("\nGenerated PlantUML:")
         print("-" * 70)
         print(response)
         print("-" * 70)
-        
+
     except Exception as e:
         print(f"✗ Generation failed: {e}")
         return False
-    
+
     return True
 
 
@@ -129,7 +129,7 @@ def test_json_output(args):
     print("\n" + "=" * 70)
     print("Test 3: JSON Structured Output")
     print("=" * 70)
-    
+
     sampling = SamplingParams(
         temperature=0.0,
         top_p=1.0,
@@ -137,9 +137,9 @@ def test_json_output(args):
         max_tokens=512,
         repetition_penalty=1.1,
     )
-    
+
     print(f"Loading model: {args.model}")
-    
+
     try:
         llm = LLM(
             model=args.model,
@@ -151,7 +151,7 @@ def test_json_output(args):
     except Exception as e:
         print(f"✗ Failed to load model: {e}")
         return False
-    
+
     json_prompt = """Return ONLY a valid JSON object with these keys:
 {
   "class": "A simple class diagram",
@@ -161,13 +161,13 @@ def test_json_output(args):
 Replace the values with actual PlantUML code snippets (just basic examples).
 Output ONLY the JSON, no other text.
 """
-    
+
     print("Generating JSON output...")
     try:
         outputs = llm.generate([json_prompt], sampling)
         response = outputs[0].outputs[0].text.strip()
         print("✓ Generation successful!")
-        
+
         import json
         try:
             parsed = json.loads(response)
@@ -176,11 +176,11 @@ Output ONLY the JSON, no other text.
         except json.JSONDecodeError as e:
             print(f"⚠ JSON parsing failed: {e}")
             print(f"  Response: {response[:200]}")
-            
+
     except Exception as e:
         print(f"✗ Generation failed: {e}")
         return False
-    
+
     return True
 
 
@@ -200,7 +200,7 @@ Examples:
   %(prog)s --model meta-llama/Llama-3-8B-Instruct --tp 1
         """
     )
-    
+
     parser.add_argument(
         "--model", "-m",
         required=True,
@@ -224,9 +224,9 @@ Examples:
         default="all",
         help="Which test to run (default: all)",
     )
-    
+
     args = parser.parse_args()
-    
+
     print("=" * 70)
     print("vLLM + PlantUML Generation Test Suite")
     print("=" * 70)
@@ -234,29 +234,29 @@ Examples:
     print(f"Tensor Parallel:  {args.tp} GPUs")
     print(f"Max Length:       {args.max_len}")
     print("=" * 70)
-    
+
     results = {}
-    
+
     if args.test in ["basic", "all"]:
         results["basic"] = test_basic_inference(args)
-    
+
     if args.test in ["plantuml", "all"]:
         results["plantuml"] = test_plantuml_generation(args)
-    
+
     if args.test in ["json", "all"]:
         results["json"] = test_json_output(args)
-    
+
     # Summary
     print("\n" + "=" * 70)
     print("Test Results Summary")
     print("=" * 70)
-    
+
     for test_name, passed in results.items():
         status = "✓ PASSED" if passed else "✗ FAILED"
         print(f"{test_name.ljust(20)} {status}")
-    
+
     all_passed = all(results.values())
-    
+
     print("=" * 70)
     if all_passed:
         print("✓ All tests passed! Ready to generate PlantUML diagrams.")

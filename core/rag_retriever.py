@@ -10,10 +10,10 @@ class RagRetriever:
     """FAISS + sentence-transformers based RAG for PlantUML examples."""
 
     def __init__(
-        self,
-        faiss_index_path: str,
-        faiss_meta_path: str,
-        embed_model_name: str = "nomic-embed-text",
+            self,
+            faiss_index_path: str,
+            faiss_meta_path: str,
+            embed_model_name: str = "nomic-embed-text",
     ) -> None:
         self.index = faiss.read_index(faiss_index_path)
         with open(faiss_meta_path, "r", encoding="utf-8") as f:

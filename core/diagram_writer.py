@@ -5,10 +5,10 @@ from .plantuml_sanitizer import sanitize_and_validate_plantuml
 
 
 def write_diagrams(
-    output_dir: str,
-    repo_name: str,
-    diagrams: Dict[str, str],
-    validate: bool = True,
+        output_dir: str,
+        repo_name: str,
+        diagrams: Dict[str, str],
+        validate: bool = True,
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
 

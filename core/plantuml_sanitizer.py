@@ -12,7 +12,6 @@ import subprocess
 import tempfile
 from typing import Tuple
 
-
 # Pattern: A --> "label" B   (invalid)
 RELATION_LABEL_IN_MIDDLE = re.compile(
     r"^\s*(\w+)\s*([-.]+>)\s*\"([^\"]+)\"\s*(\w+)\s*$"

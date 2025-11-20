@@ -2,12 +2,12 @@ import requests
 
 
 def ollama_chat(
-    ollama_url: str,
-    model: str,
-    system_msg: str,
-    user_msg: str,
-    num_ctx: int = 200000,
-    timeout: int = 1800,
+        ollama_url: str,
+        model: str,
+        system_msg: str,
+        user_msg: str,
+        num_ctx: int = 200000,
+        timeout: int = 1800,
 ) -> str:
     payload = {
         "model": model,

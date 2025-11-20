@@ -5,12 +5,13 @@ Side-by-side comparison: Your test-vllm-v2.py vs full PlantUML system.
 This demonstrates how your simple test script maps to the full diagram generator.
 """
 
+
 def show_comparison():
     print("=" * 80)
     print("YOUR TEST SCRIPT (test-vllm-v2.py) vs FULL PLANTUML SYSTEM")
     print("=" * 80)
     print()
-    
+
     print("┌─────────────────────────────────────────────────────────────────────────────┐")
     print("│ YOUR TEST SCRIPT: test-vllm-v2.py                                           │")
     print("└─────────────────────────────────────────────────────────────────────────────┘")
@@ -41,7 +42,7 @@ out = llm.generate([prompt], sampling)
 # 4. Print result
 print(out[0].outputs[0].text)
 """)
-    
+
     print()
     print("┌─────────────────────────────────────────────────────────────────────────────┐")
     print("│ FULL SYSTEM: repo_to_diagrams_local_vllm.py                                 │")
@@ -94,7 +95,7 @@ validate_plantuml(diagrams)       # Check syntax
 # STEP 8: Write to files (NEW)
 write_diagrams("./uml", repo_name, diagrams)
 """)
-    
+
     print()
     print("=" * 80)
     print("KEY INSIGHT")
@@ -114,7 +115,7 @@ The full system just adds:
 
 But the vLLM inference is exactly what you're already doing!
 """)
-    
+
     print()
     print("=" * 80)
     print("MIGRATION PATH")
@@ -141,7 +142,7 @@ From your test to full system:
 
 5. Done! You now have 8 PlantUML diagrams.
 """)
-    
+
     print()
     print("=" * 80)
     print("PARAMETER MAPPING")
@@ -161,7 +162,7 @@ Your test-vllm-v2.py          →  repo_to_diagrams_local_vllm.py
 (new)                         →  --faiss-index rag/faiss.index
 (new)                         →  --faiss-meta rag/faiss_meta.json
 """)
-    
+
     print()
     print("=" * 80)
     print("EXAMPLE: YOUR EXACT COMMAND TRANSLATED")
@@ -187,7 +188,7 @@ python repo_to_diagrams_local_vllm.py \\
 
 Everything else is identical under the hood!
 """)
-    
+
     print()
     print("=" * 80)
     print("WHAT'S ADDED (The Value-Add)")
@@ -219,7 +220,7 @@ Everything else is identical under the hood!
    • Catches generation errors
    • Provides helpful error messages
 """)
-    
+
     print()
     print("=" * 80)
     print("TL;DR")

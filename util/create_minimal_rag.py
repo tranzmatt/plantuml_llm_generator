@@ -20,7 +20,6 @@ except ImportError as e:
     print("  pip install faiss-cpu sentence-transformers numpy")
     sys.exit(1)
 
-
 # Minimal but representative PlantUML examples
 EXAMPLES = [
     # Class Diagrams
@@ -72,7 +71,7 @@ class Cat extends Animal {
 }
 @enduml"""
     },
-    
+
     # Sequence Diagrams
     {
         "type": "sequence",
@@ -108,7 +107,7 @@ AuthService --> Frontend: Auth Token
 Frontend --> User: Success
 @enduml"""
     },
-    
+
     # Activity Diagrams
     {
         "type": "activity",
@@ -144,7 +143,7 @@ endif
 stop
 @enduml"""
     },
-    
+
     # State Diagrams
     {
         "type": "state",
@@ -170,7 +169,7 @@ Connecting --> Disconnected : fail
 Connected --> Disconnected : disconnect()
 @enduml"""
     },
-    
+
     # Component Diagrams
     {
         "type": "component",
@@ -200,7 +199,7 @@ order --> queue : events
 payment --> queue : events
 @enduml"""
     },
-    
+
     # Deployment Diagrams
     {
         "type": "deployment",
@@ -248,7 +247,7 @@ cloud "AWS" {
 [App Instance 2] --> [PostgreSQL]
 @enduml"""
     },
-    
+
     # Use Case Diagrams
     {
         "type": "usecase",
@@ -286,7 +285,7 @@ rectangle Platform {
 }
 @enduml"""
     },
-    
+
     # Object Diagrams
     {
         "type": "object",
@@ -330,15 +329,15 @@ request --> response : generates
 
 def create_rag_index(output_dir="rag", embed_model="nomic-embed-text"):
     """Create FAISS index and metadata from examples."""
-    
+
     print("=" * 70)
     print("Creating Minimal PlantUML RAG Index")
     print("=" * 70)
-    
+
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     print(f"\n[1/4] Created output directory: {output_dir}/")
-    
+
     # Load embedding model
     print(f"\n[2/4] Loading embedding model: {embed_model}")
     print("      (This may download the model on first run...)")
@@ -348,7 +347,7 @@ def create_rag_index(output_dir="rag", embed_model="nomic-embed-text"):
     except Exception as e:
         print(f"      ✗ Failed to load model: {e}")
         sys.exit(1)
-    
+
     # Create embeddings
     print(f"\n[3/4] Creating embeddings for {len(EXAMPLES)} examples...")
     texts = []
@@ -356,7 +355,7 @@ def create_rag_index(output_dir="rag", embed_model="nomic-embed-text"):
         # Embed the type and description for better retrieval
         text = f"plantuml {ex['type']} diagram {ex['description']}"
         texts.append(text)
-    
+
     try:
         embeddings = model.encode(texts, normalize_embeddings=True)
         embeddings = embeddings.astype('float32')
@@ -364,24 +363,24 @@ def create_rag_index(output_dir="rag", embed_model="nomic-embed-text"):
     except Exception as e:
         print(f"      ✗ Failed to create embeddings: {e}")
         sys.exit(1)
-    
+
     # Build FAISS index
     print("\n[4/4] Building FAISS index...")
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatIP(dimension)  # Inner product for normalized vectors
     index.add(embeddings)
-    
+
     # Save index
     index_path = os.path.join(output_dir, "faiss.index")
     faiss.write_index(index, index_path)
     print(f"      ✓ Saved index: {index_path}")
-    
+
     # Save metadata
     meta_path = os.path.join(output_dir, "faiss_meta.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(EXAMPLES, f, indent=2)
     print(f"      ✓ Saved metadata: {meta_path}")
-    
+
     # Summary
     print("\n" + "=" * 70)
     print("SUCCESS: RAG Index Created")
@@ -394,16 +393,16 @@ def create_rag_index(output_dir="rag", embed_model="nomic-embed-text"):
     print(f"  - Total examples:  {len(EXAMPLES)}")
     print(f"  - Vector dimension: {dimension}")
     print(f"  - Index type:      Inner Product (normalized)")
-    
+
     # Show examples per type
     type_counts = {}
     for ex in EXAMPLES:
         type_counts[ex['type']] = type_counts.get(ex['type'], 0) + 1
-    
+
     print(f"\nExamples per diagram type:")
     for dtype, count in sorted(type_counts.items()):
         print(f"  - {dtype.ljust(12)} {count}")
-    
+
     print("\n" + "=" * 70)
     print("Next Steps:")
     print("=" * 70)
@@ -427,32 +426,32 @@ def verify_index(index_path="rag/faiss.index", meta_path="rag/faiss_meta.json"):
     print("\n" + "=" * 70)
     print("Verifying Index...")
     print("=" * 70)
-    
+
     try:
         # Load index
         index = faiss.read_index(index_path)
         print(f"✓ Index loaded: {index.ntotal} vectors")
-        
+
         # Load metadata
         with open(meta_path, "r") as f:
             meta = json.load(f)
         print(f"✓ Metadata loaded: {len(meta)} entries")
-        
+
         # Quick search test
         model = SentenceTransformer("nomic-embed-text")
         query_vec = model.encode(["class diagram example"], normalize_embeddings=True).astype('float32')
         scores, indices = index.search(query_vec, 3)
-        
+
         print("\nTest query: 'class diagram example'")
         print(f"Top results:")
         for i, (idx, score) in enumerate(zip(indices[0], scores[0])):
             if idx >= 0 and idx < len(meta):
                 ex = meta[idx]
-                print(f"  {i+1}. [{ex['type']}] {ex['description']} (score: {score:.3f})")
-        
+                print(f"  {i + 1}. [{ex['type']}] {ex['description']} (score: {score:.3f})")
+
         print("\n✓ Index verification successful!")
         return True
-        
+
     except Exception as e:
         print(f"\n✗ Verification failed: {e}")
         return False
@@ -460,7 +459,7 @@ def verify_index(index_path="rag/faiss.index", meta_path="rag/faiss_meta.json"):
 
 def main():
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="Create minimal PlantUML RAG index for testing",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -475,7 +474,7 @@ For production use:
 The index includes 2 examples per diagram type (16 total).
         """
     )
-    
+
     parser.add_argument(
         "--output-dir", "-o",
         default="rag",
@@ -491,12 +490,12 @@ The index includes 2 examples per diagram type (16 total).
         action="store_true",
         help="Skip index verification after creation",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Create index
     create_rag_index(args.output_dir, args.embed_model)
-    
+
     # Verify
     if not args.no_verify:
         index_path = os.path.join(args.output_dir, "faiss.index")

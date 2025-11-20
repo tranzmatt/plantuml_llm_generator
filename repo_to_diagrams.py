@@ -13,9 +13,9 @@ from llm_backends.vllm_client import vllm_chat
 
 
 def build_rag_context(
-    retriever: RagRetriever,
-    diagram_types: List[str],
-    per_type: int = 4,
+        retriever: RagRetriever,
+        diagram_types: List[str],
+        per_type: int = 4,
 ):
     ctx = {}
     for dtype in diagram_types:

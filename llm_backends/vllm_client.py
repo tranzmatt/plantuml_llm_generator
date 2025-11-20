@@ -2,13 +2,13 @@ import requests
 
 
 def vllm_chat(
-    base_url: str,
-    model: str,
-    system_msg: str,
-    user_msg: str,
-    max_tokens: int = 8000,
-    temperature: float = 0.1,
-    timeout: int = 1800,
+        base_url: str,
+        model: str,
+        system_msg: str,
+        user_msg: str,
+        max_tokens: int = 8000,
+        temperature: float = 0.1,
+        timeout: int = 1800,
 ) -> str:
     payload = {
         "model": model,

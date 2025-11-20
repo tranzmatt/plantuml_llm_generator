@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-PlantUML diagram generator using vLLM backend exclusively.
+PlantUML diagram generator using vLLM Python library directly (no server needed).
 
-This is a streamlined version optimized for vLLM deployment with:
-- Simplified configuration (no backend selection)
-- vLLM-specific parameter tuning
-- Better defaults for large context windows
-- Optimized for high-throughput inference
+This version loads the model directly into GPU memory and runs inference locally.
+Optimized for DGX A100 and multi-GPU setups.
 """
 
 import argparse
@@ -14,18 +11,19 @@ import os
 import sys
 from typing import Dict, List
 
+from vllm import LLM, SamplingParams
+
 from core.repo_scanner import scan_python_repo, load_repo_text
 from core.rag_retriever import RagRetriever
 from core.prompt_builder import build_system_prompt, build_user_prompt
 from core.diagram_writer import write_diagrams
 from core.utils import get_repo_name, safe_json_loads
-from llm_backends.vllm_client import vllm_chat
 
 
 def build_rag_context(
-    retriever: RagRetriever,
-    diagram_types: List[str],
-    per_type: int = 4,
+        retriever: RagRetriever,
+        diagram_types: List[str],
+        per_type: int = 4,
 ) -> Dict[str, List[Dict]]:
     """Build RAG context by retrieving examples for each diagram type."""
     ctx = {}
@@ -38,48 +36,63 @@ def build_rag_context(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate PlantUML diagrams using vLLM backend",
+        description="Generate PlantUML diagrams using vLLM Python library (local inference)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Local vLLM server with Llama-4-Maverick
-  %(prog)s --input ./myrepo --model meta-llama/Llama-4-Maverick-17B-128E-Instruct
+  # Basic usage with 4 GPUs
+  %(prog)s --input ./myrepo --model openai/gpt-oss-120b --tp 4
 
-  # Remote vLLM server
-  %(prog)s --input ./myrepo --vllm-url http://gpu-server:8000 --model local
+  # With custom max length
+  %(prog)s --input ./myrepo --model openai/gpt-oss-120b --tp 4 --max-len 16000
 
-  # With custom RAG index
-  %(prog)s --input ./myrepo --faiss-index ./custom_rag/index.faiss
+  # High quality with more RAG examples
+  %(prog)s --input ./myrepo --model openai/gpt-oss-120b --tp 4 --rag-examples 8
 
 Environment Variables:
-  VLLM_URL              Base URL for vLLM server (default: http://localhost:8000)
   PLANTUML_EMBED_MODEL  Embedding model for RAG (default: nomic-embed-text)
+  CUDA_VISIBLE_DEVICES  GPU selection (e.g., 0,1,2,3)
         """
     )
-    
+
     # Input/Output
     parser.add_argument(
-        "--input", "-i", 
+        "--input", "-i",
         default=".",
         help="Root folder of source code repository (default: current directory)",
     )
     parser.add_argument(
-        "--output", "-o", 
+        "--output", "-o",
         default="uml",
         help="Output folder for .puml files (default: ./uml)",
     )
-    
-    # vLLM Configuration
-    parser.add_argument(
-        "--vllm-url", 
-        default=os.environ.get("VLLM_URL", "http://localhost:8000"),
-        help="vLLM server base URL (default: $VLLM_URL or http://localhost:8000)",
-    )
+
+    # vLLM Model Configuration
     parser.add_argument(
         "--model", "-m",
-        default="meta-llama/Llama-4-Maverick-17B-128E-Instruct",
-        help="Model name/path on vLLM server (default: Llama-4-Maverick-17B-128E-Instruct)",
+        required=True,
+        help="Model name or path (e.g., openai/gpt-oss-120b, meta-llama/Llama-4-Maverick-17B-128E-Instruct)",
     )
+    parser.add_argument(
+        "--tp",
+        type=int,
+        default=2,
+        help="Tensor parallel size (number of GPUs to use, default: 2)",
+    )
+    parser.add_argument(
+        "--max-len",
+        type=int,
+        default=16000,
+        help="Max model sequence length (default: 16000)",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.95,
+        help="GPU memory utilization fraction (default: 0.95)",
+    )
+
+    # Sampling Parameters
     parser.add_argument(
         "--max-tokens",
         type=int,
@@ -89,24 +102,30 @@ Environment Variables:
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.1,
-        help="Sampling temperature for generation (default: 0.1 for deterministic output)",
+        default=0.0,
+        help="Sampling temperature (default: 0.0 for deterministic output)",
     )
     parser.add_argument(
-        "--timeout",
-        type=int,
-        default=1800,
-        help="Request timeout in seconds (default: 1800 = 30 minutes)",
+        "--top-p",
+        type=float,
+        default=1.0,
+        help="Top-p sampling parameter (default: 1.0)",
     )
-    
+    parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=1.1,
+        help="Repetition penalty to prevent loops (default: 1.1)",
+    )
+
     # RAG Configuration
     parser.add_argument(
-        "--faiss-index", 
+        "--faiss-index",
         required=True,
         help="Path to FAISS index file for RAG retrieval",
     )
     parser.add_argument(
-        "--faiss-meta", 
+        "--faiss-meta",
         required=True,
         help="Path to metadata JSON file for FAISS index",
     )
@@ -116,15 +135,15 @@ Environment Variables:
         help="Sentence-transformers embedding model (default: nomic-embed-text)",
     )
     parser.add_argument(
-        "--rag-examples-per-type",
+        "--rag-examples",
         type=int,
         default=4,
         help="Number of RAG examples to retrieve per diagram type (default: 4)",
     )
-    
+
     # Validation
     parser.add_argument(
-        "--no-validate", 
+        "--no-validate",
         action="store_true",
         help="Skip PlantUML validation with 'plantuml -checkonly'",
     )
@@ -133,7 +152,7 @@ Environment Variables:
         action="store_true",
         help="Enable verbose output",
     )
-    
+
     args = parser.parse_args()
 
     # Resolve paths
@@ -141,51 +160,53 @@ Environment Variables:
     if not os.path.isdir(repo_root):
         print(f"Error: Input directory does not exist: {repo_root}", file=sys.stderr)
         sys.exit(1)
-    
+
     repo_name = get_repo_name(repo_root)
 
     # Display configuration
     print("=" * 70)
-    print("PlantUML Diagram Generator (vLLM Backend)")
+    print("PlantUML Diagram Generator (vLLM Local Inference)")
     print("=" * 70)
-    print(f"Repository Root:  {repo_root}")
-    print(f"Repository Name:  {repo_name}")
-    print(f"Output Directory: {args.output}")
-    print(f"vLLM Server:      {args.vllm_url}")
-    print(f"Model:            {args.model}")
-    print(f"Max Tokens:       {args.max_tokens}")
-    print(f"Temperature:      {args.temperature}")
-    print(f"Validation:       {'Disabled' if args.no_validate else 'Enabled'}")
+    print(f"Repository Root:     {repo_root}")
+    print(f"Repository Name:     {repo_name}")
+    print(f"Output Directory:    {args.output}")
+    print(f"Model:               {args.model}")
+    print(f"Tensor Parallel:     {args.tp} GPUs")
+    print(f"Max Model Length:    {args.max_len}")
+    print(f"GPU Memory Util:     {args.gpu_memory_utilization:.2f}")
+    print(f"Max Output Tokens:   {args.max_tokens}")
+    print(f"Temperature:         {args.temperature}")
+    print(f"Validation:          {'Disabled' if args.no_validate else 'Enabled'}")
     print("=" * 70)
 
     # Step 1: Scan repository
-    print("\n[1/5] Scanning Python files...")
+    print("\n[1/6] Scanning Python files...")
     py_files = scan_python_repo(repo_root)
-    
+
     if not py_files:
         print(f"Error: No Python files found in {repo_root}", file=sys.stderr)
         sys.exit(1)
-    
+
     print(f"      Found {len(py_files)} Python files")
-    
+
     if args.verbose:
         for f in py_files[:10]:
             print(f"      - {f}")
         if len(py_files) > 10:
             print(f"      ... and {len(py_files) - 10} more")
-    
+
     repo_text = load_repo_text(py_files)
     print(f"      Loaded {len(repo_text):,} characters of source code")
 
     # Step 2: Initialize RAG retriever
-    print("\n[2/5] Initializing RAG retriever...")
+    print("\n[2/6] Initializing RAG retriever...")
     if not os.path.exists(args.faiss_index):
         print(f"Error: FAISS index not found: {args.faiss_index}", file=sys.stderr)
         sys.exit(1)
     if not os.path.exists(args.faiss_meta):
         print(f"Error: FAISS metadata not found: {args.faiss_meta}", file=sys.stderr)
         sys.exit(1)
-    
+
     try:
         retriever = RagRetriever(
             faiss_index_path=args.faiss_index,
@@ -202,54 +223,78 @@ Environment Variables:
         "class", "sequence", "activity", "state",
         "component", "deployment", "usecase", "object",
     ]
-    
-    print(f"\n[3/5] Retrieving RAG examples ({args.rag_examples_per_type} per type)...")
+
+    print(f"\n[3/6] Retrieving RAG examples ({args.rag_examples} per type)...")
     rag_ctx = build_rag_context(
-        retriever, 
-        diagram_types, 
-        per_type=args.rag_examples_per_type
+        retriever,
+        diagram_types,
+        per_type=args.rag_examples
     )
-    
+
     total_examples = sum(len(examples) for examples in rag_ctx.values())
     print(f"      Retrieved {total_examples} total examples")
 
-    # Step 4: Build prompts and call vLLM
-    print("\n[4/5] Generating diagrams with vLLM...")
+    # Step 4: Load vLLM model
+    print(f"\n[4/6] Loading model into GPU memory...")
+    print(f"      Model: {args.model}")
+    print(f"      Using {args.tp} GPUs with tensor parallelism")
+    print("      (This may take 1-2 minutes...)")
+
+    try:
+        sampling_params = SamplingParams(
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=1 if args.temperature == 0.0 else -1,
+            max_tokens=args.max_tokens,
+            repetition_penalty=args.repetition_penalty,
+        )
+
+        llm = LLM(
+            model=args.model,
+            tensor_parallel_size=args.tp,
+            max_model_len=args.max_len,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            trust_remote_code=True,
+        )
+        print("      Model loaded successfully!")
+    except Exception as e:
+        print(f"\nError loading model: {e}", file=sys.stderr)
+        print("\nTroubleshooting tips:", file=sys.stderr)
+        print(f"  1. Verify model name/path is correct: {args.model}", file=sys.stderr)
+        print(f"  2. Check GPU availability: nvidia-smi", file=sys.stderr)
+        print(f"  3. Try reducing --tp (current: {args.tp})", file=sys.stderr)
+        print(f"  4. Try reducing --max-len (current: {args.max_len})", file=sys.stderr)
+        sys.exit(1)
+
+    # Step 5: Build prompts and generate
+    print("\n[5/6] Generating diagrams with vLLM...")
     system_msg = build_system_prompt()
     user_msg = build_user_prompt(repo_name, repo_text, rag_ctx)
-    
+
+    # Combine system and user messages
+    full_prompt = f"{system_msg}\n\n{user_msg}"
+
     if args.verbose:
         print(f"      System prompt: {len(system_msg)} chars")
         print(f"      User prompt: {len(user_msg)} chars")
-        print(f"      Total prompt size: {len(system_msg) + len(user_msg):,} chars")
-    
-    print(f"      Calling vLLM at {args.vllm_url}...")
+        print(f"      Total prompt size: {len(full_prompt):,} chars")
+
+    print("      Running inference...")
     print("      (This may take several minutes for large repositories)")
-    
+
     try:
-        raw_response = vllm_chat(
-            base_url=args.vllm_url,
-            model=args.model,
-            system_msg=system_msg,
-            user_msg=user_msg,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-            timeout=args.timeout,
-        )
+        outputs = llm.generate([full_prompt], sampling_params)
+        raw_response = outputs[0].outputs[0].text
     except Exception as e:
-        print(f"\nError calling vLLM: {e}", file=sys.stderr)
-        print("\nTroubleshooting tips:", file=sys.stderr)
-        print(f"  1. Verify vLLM is running at: {args.vllm_url}", file=sys.stderr)
-        print(f"  2. Check model is loaded: {args.model}", file=sys.stderr)
-        print("  3. Review vLLM server logs for errors", file=sys.stderr)
+        print(f"\nError during inference: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     if args.verbose:
         print(f"      Response length: {len(raw_response):,} chars")
 
-    # Step 5: Parse and write diagrams
-    print("\n[5/5] Parsing and writing diagrams...")
-    
+    # Step 6: Parse and write diagrams
+    print("\n[6/6] Parsing and writing diagrams...")
+
     try:
         diagrams = safe_json_loads(raw_response)
     except ValueError as e:

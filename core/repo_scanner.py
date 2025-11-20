@@ -1,6 +1,7 @@
 import os
 from typing import List
 
+
 def scan_python_repo(root: str) -> List[str]:
     """Recursively find all .py files under root."""
     py_files: List[str] = []
@@ -9,6 +10,7 @@ def scan_python_repo(root: str) -> List[str]:
             if name.endswith(".py"):
                 py_files.append(os.path.join(dirpath, name))
     return py_files
+
 
 def load_repo_text(files: List[str]) -> str:
     """Concatenate the contents of all Python files into a single string."""
