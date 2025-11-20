@@ -143,17 +143,19 @@ plantuml-rag/
 │   ├── diagram_writer.py             # File output
 │   └── utils.py                      # Helpers
 │
-├── llm_backends/                      # Backend clients
+├── llm_backends/                     # Backend clients
 │   ├── ollama_client.py              # Ollama integration
 │   └── vllm_client.py                # vLLM API integration
 │
-├── cli/                               # Command-line tools
-│   └── repo_to_diagrams.py           # Dual-backend CLI
+├── cli/                              # Command-line tools
+│   ├── repo_to_diagrams.py           # Dual-backend CLI
+│   ├── repo_to_diagrams_vllm.py      # Remove VLLM
+│   └── repo_to_diagrams_local_vllm.py # Local vLLM version
 │
-├── repo_to_diagrams_local_vllm.py    # Local vLLM version
-├── test_plantuml_vllm.py             # Validation tests
-├── create_minimal_rag.py             # RAG index creator
-└── comparison.py                      # Architecture comparison
+└── util/                             # Utility tools
+    ├── test_plantuml_vllm.py             # Validation tests
+    ├── create_minimal_rag.py             # RAG index creator
+    └── comparison.py                      # Architecture comparison
 ```
 
 ---
