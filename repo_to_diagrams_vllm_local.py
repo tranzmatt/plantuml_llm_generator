@@ -189,6 +189,11 @@ def parse_multi_diagram_output(
 
 
 def main():
+    # Disable vLLM v1 engine if not explicitly enabled
+    # v1 engine can have CUDA graph issues on some setups
+    if "VLLM_USE_V1" not in os.environ:
+        os.environ["VLLM_USE_V1"] = "0"
+
     parser = argparse.ArgumentParser(
         description="Generate ALL system-level UML PlantUML .puml diagrams in a SINGLE LLM call using FAISS RAG + local vLLM."
     )
@@ -254,6 +259,11 @@ def main():
         type=float,
         default=0.95,
         help="GPU memory utilization (default: 0.95).",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graphs (fixes some CUDA errors).",
     )
 
     args = parser.parse_args()
@@ -321,6 +331,7 @@ def main():
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         trust_remote_code=True,
+        enforce_eager=args.enforce_eager,
     )
     print("      Model loaded successfully")
 
