@@ -3,9 +3,13 @@
 Generate PlantUML diagrams using local vLLM (Python library).
 Based on the working Ollama version but uses vLLM for inference.
 """
+import os
+
+#os.environ["VLLM_USE_V1"] = "0"       # must happen before importing vLLM
+#os.environ["VLLM_USE_MODELSCOPE"] = "0"
+
 import argparse
 import json
-import os
 import re
 from typing import List, Dict, Tuple
 
