@@ -50,15 +50,6 @@ def walk_repo_collect_code(root: str) -> str:
     return "\n".join(chunks)
 
 
-def embed_texts(texts: List[str], embed_model: str) -> np.ndarray:
-    """
-    Embed texts using sentence-transformers (same as RagRetriever).
-    """
-    model = SentenceTransformer(embed_model)
-    embeddings = model.encode(texts, normalize_embeddings=True)
-    return embeddings.astype("float32")
-
-
 def vllm_generate(
     llm: LLM,
     system_msg: str,
@@ -103,14 +94,15 @@ def get_rag_examples_for_type(
     diagram_type: str,
     index: faiss.Index,
     docs: List[Dict],
-    embed_model: str,
+    embed_model: SentenceTransformer,
     top_k: int,
 ) -> str:
     """
     Retrieve RAG examples for a specific diagram type.
     """
     query = f"PlantUML {diagram_type} diagram for a distributed Python microservice application."
-    q_emb = embed_texts([query], embed_model)
+    # Use the cached model directly
+    q_emb = embed_model.encode([query], normalize_embeddings=True).astype("float32")
     scores, indices = index.search(q_emb, top_k)
 
     examples: List[str] = []
@@ -286,21 +278,30 @@ def main():
     print(f"RAG Top-K:       {args.rag_k}")
     print("=" * 70)
 
-    print("[repo_to_diagrams] Collecting Python code from repo...")
+    print("\n[1/5] Collecting Python code from repo...")
     full_repo_text = walk_repo_collect_code(repo_root)
     if not full_repo_text.strip():
         raise RuntimeError("No Python files found in the repo.")
     print(f"      Collected code from repository ({len(full_repo_text)} chars)")
 
-    print(f"[repo_to_diagrams] Loading FAISS RAG from {args.faiss_index} and {args.faiss_meta}")
-    index, docs, embed_model = load_faiss_and_meta(args.faiss_index, args.faiss_meta)
-    print(f"      Loaded {len(docs)} documents, embedding model: {embed_model}")
+    print(f"\n[2/5] Loading FAISS RAG from {args.faiss_index} and {args.faiss_meta}")
+    index, docs, embed_model_name = load_faiss_and_meta(args.faiss_index, args.faiss_meta)
+    print(f"      Loaded {len(docs)} documents, embedding model: {embed_model_name}")
+    
+    # Load embedding model once for all RAG queries
+    print(f"      Loading embedding model...")
+    if embed_model_name == "nomic-embed-text":
+        model_id = "nomic-ai/nomic-embed-text-v1.5"
+    else:
+        model_id = embed_model_name
+    embed_model = SentenceTransformer(model_id, trust_remote_code=True)
+    print(f"      Embedding model loaded")
 
     # Get RAG examples for all diagram types up front
-    print("\n[repo_to_diagrams] Retrieving RAG examples for each diagram type...")
+    print("\n[3/5] Retrieving RAG examples for each diagram type...")
     rag_examples_by_type: Dict[str, str] = {}
     for dtype, _desc in DIAGRAM_TYPES:
-        print(f"[repo_to_diagrams] Retrieving RAG examples for {dtype} diagrams...")
+        print(f"      - Retrieving {dtype} examples...")
         try:
             rag_examples_by_type[dtype] = get_rag_examples_for_type(
                 diagram_type=dtype,
@@ -310,10 +311,10 @@ def main():
                 top_k=args.rag_k,
             )
         except Exception as e:
-            print(f"[repo_to_diagrams] Warning: RAG retrieval for {dtype} failed: {e}")
+            print(f"      Warning: RAG retrieval for {dtype} failed: {e}")
             rag_examples_by_type[dtype] = ""
 
-    print("\n[repo_to_diagrams] Loading vLLM model (this may take a few minutes)...")
+    print("\n[4/5] Loading vLLM model (this may take a few minutes)...")
     llm = LLM(
         model=args.model,
         tensor_parallel_size=args.tp,
@@ -411,7 +412,7 @@ def main():
 
     user_msg = "\n".join(user_parts)
 
-    print("[repo_to_diagrams] Calling Ollama once to generate ALL diagrams...")
+    print("\n[5/5] Generating all diagrams in one LLM call...")
     raw_output = vllm_generate(
         llm=llm,
         system_msg=system_msg,
@@ -421,7 +422,7 @@ def main():
     )
 
     # Parse the combined output into separate diagrams
-    print("[repo_to_diagrams] Parsing output and writing diagram files...")
+    print("\n[6/6] Parsing output and writing diagram files...")
     diagram_types = [dt for dt, _ in DIAGRAM_TYPES]
     parsed = parse_multi_diagram_output(raw_output, diagram_types)
 
@@ -430,13 +431,13 @@ def main():
     for dtype, _desc in DIAGRAM_TYPES:
         diag_text = parsed.get(dtype, "").strip()
         if not diag_text:
-            print(f"[repo_to_diagrams] Warning: no diagram text parsed for type '{dtype}'. Skipping file.")
+            print(f"      Warning: no diagram text parsed for type '{dtype}'. Skipping file.")
             continue
         out_name = f"{repo_name}_{dtype}.puml"
         out_path = os.path.join(output_dir, out_name)
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(diag_text)
-        print(f"[repo_to_diagrams] Wrote {dtype} diagram to {out_path}")
+        print(f"      ✓ Wrote {dtype} diagram to {out_path}")
         written_count += 1
 
     print("\n" + "=" * 70)
