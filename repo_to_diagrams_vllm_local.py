@@ -2,11 +2,62 @@
 """
 Generate PlantUML diagrams using local vLLM (Python library).
 Based on the working Ollama version but uses vLLM for inference.
+
+---------------------------------------------------------------------------
+vLLM CONFIGURATION NOTES
+
+This script forces the vLLM V1 engine because some models do not yet
+reliably support V2 on multi-GPU systems.
+
+Large models (70B+) can OOM during the sampler warm-up step if vLLM uses
+the default 256 dummy sequences. To prevent this, we explicitly reduce the
+warm-up batch size and lower memory utilization.
+
+Settings used:
+  VLLM_USE_V1 = 1             -> Stable engine for 70B models
+  VLLM_NO_CUDA_GRAPH = 1      -> Avoids cudagraph memory spikes during warmup
+  VLLM_ENFORCE_EAGER = 1      -> Reduces fragmentation; more predictable
+  VLLM_MAX_NUM_SEQS = 32      -> Prevents OOM in sampler warmup (critical)
+  VLLM_GPU_MEMORY_UTILIZATION = 0.85
+  VLLM_WORKER_MULTIPROC_METHOD = "spawn"
+
+If you want to try V2 later:
+  - Remove USE_V1 and ENABLE eager mode
+  - Re-enable CUDA graphs
+  - Keep MAX_NUM_SEQS low for large models
+
+These environment variables MUST be set before importing vllm.
+---------------------------------------------------------------------------
 """
 import os
 
-#os.environ["VLLM_USE_V1"] = "0"       # must happen before importing vLLM
-#os.environ["VLLM_USE_MODELSCOPE"] = "0"
+## USE V1 VERSION ##
+os.environ["VLLM_USE_V1"] = "1"       # must happen before importing vLLM
+os.environ["VLLM_NO_CUDA_GRAPH"] = "1"
+os.environ["VLLM_ENFORCE_EAGER"] = "1"
+os.environ["VLLM_USE_MODELSCOPE"] = "0"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+## USE V2 VERSION - NOT ALL MODELS SUPPORT IT ##
+#os.environ["VLLM_USE_V1"] = "0"                   # Explicitly enable V2
+#os.environ["VLLM_USE_MODELSCOPE"] = "0"           # Keep same behavior as V1 version
+#os.environ["VLLM_NO_CUDA_GRAPH"] = "0"            # Allow cudagraphs (V2 handles them)
+#os.environ["VLLM_ENFORCE_EAGER"] = "0"            # V2 prefers non-eager execution
+
+os.environ["VLLM_MAX_NUM_SEQS"] = "32"       # default is 256; WAY too large
+
+# Safer GPU memory utilization
+os.environ["VLLM_GPU_MEMORY_UTILIZATION"] = "0.85"
+
+import json
+
+os.environ["VLLM_WORKER_MULTIPROC_ENV"] = json.dumps(dict(os.environ))
+
+import multiprocessing
+
+import sys
+
+print("DEBUG: After env vars, vllm imported already? ->", "vllm" in sys.modules)
 
 import argparse
 import json
@@ -17,7 +68,6 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from vllm import LLM, SamplingParams
-
 
 # Fixed order, as requested
 DIAGRAM_TYPES: List[Tuple[str, str]] = [
@@ -261,8 +311,8 @@ def main():
     parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
-        default=0.95,
-        help="GPU memory utilization (default: 0.95).",
+        default=0.85,
+        help="GPU memory utilization (default: 0.85).",
     )
     parser.add_argument(
         "--enforce-eager",
