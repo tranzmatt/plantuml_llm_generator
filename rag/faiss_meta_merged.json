@@ -5894,6 +5894,90 @@
       "input": "Celebrity recognition pipeline using RabbitMQ and external APIs.",
       "output": "@startuml\nskinparam node {\n  BackgroundColor #F8F8E8\n  BorderColor #555555\n}\n\ntitle Celebrity Recognition System - Deployment Diagram\n\nnode \"Cloud Environment\" as Cloud {\n  node \"Gradio Interface App\" as GradioInterfaceApp\n  node \"Celebrity Recognition App\" as CelebrityRecognitionApp\n  node \"Information Assembler App\" as InformationAssemblerApp\n  node \"Bio Retrieval App\" as BioRetrievalApp\n  node \"Social Media Retrieval App\" as SocialMediaApp\n  node \"Recent Pictures Retrieval App\" as RecentPicturesRetrievalApp\n\n  node \"RabbitMQ Broker\" as RabbitMQ {\n    artifact image_queue\n    artifact name_queue\n    artifact bio_queue\n    artifact pictures_queue\n    artifact social_queue\n    artifact result_queue\n  }\n}\n\ncloud \"External APIs\" as External {\n  node \"Image Recognition API\" as ImageAPI\n  node \"Wikipedia Infobox API\" as WikiAPI\n  node \"Social Media API\" as SocialAPI\n}\n\nGradioInterfaceApp --> RabbitMQ : publish images / receive results\nCelebrityRecognitionApp --> RabbitMQ : consume images / publish names\nBioRetrievalApp --> RabbitMQ : consume names / publish bios\nSocialMediaApp --> RabbitMQ : consume names / publish social info\nRecentPicturesRetrievalApp --> RabbitMQ : consume names / publish pictures\nInformationAssemblerApp --> RabbitMQ : consume all / publish results\n\nCelebrityRecognitionApp --> ImageAPI : HTTP POST\nBioRetrievalApp --> WikiAPI : HTTP GET\nSocialMediaApp --> SocialAPI : HTTP GET\n@enduml",
       "text": "This is a canonical example of a large deployment diagram. Shows correct grouping, valid queue representation, external APIs, and required links."
+    },
+    {
+      "id": "activity-2001",
+      "diagram_type": "activity",
+      "instruction": "Minimal valid PlantUML activity diagram.",
+      "input": "",
+      "output": "@startuml\nstart\n:Do something;\nstop\n@enduml",
+      "text": "Smallest valid activity diagram showing start, one action, and stop."
+    },
+    {
+      "id": "activity-2002",
+      "diagram_type": "activity",
+      "instruction": "Invalid: activity diagram using sequence-diagram arrows.",
+      "input": "",
+      "output": "@startuml\nstart\nA -> B : wrong arrow\nstop\n@enduml",
+      "invalid": true,
+      "explanation": "Activity diagrams do not use participants or arrows. Only action boxes, transitions, and control structures are allowed."
+    },
+    {
+      "id": "activity-2003",
+      "diagram_type": "activity",
+      "instruction": "Valid use of decision and merge nodes.",
+      "input": "",
+      "output": "@startuml\nstart\n:Check condition;\nif (Valid?) then (yes)\n  :Process yes path;\nelse (no)\n  :Process no path;\nendif\nstop\n@enduml",
+      "text": "Shows proper if/else syntax for PlantUML activity diagrams."
+    },
+    {
+      "id": "activity-2004",
+      "diagram_type": "activity",
+      "instruction": "Invalid: using ':' labels without semicolons.",
+      "input": "",
+      "output": "@startuml\nstart\n:Missing semicolon\nstop\n@enduml",
+      "invalid": true,
+      "explanation": "PlantUML requires action boxes to end with semicolons. Without one, the diagram fails to parse."
+    },
+    {
+      "id": "activity-2005",
+      "diagram_type": "activity",
+      "instruction": "Valid fork/join concurrency example.",
+      "input": "",
+      "output": "@startuml\nstart\nfork\n  :Task A;\nfork again\n  :Task B;\nend fork\n:Continue;\nstop\n@enduml",
+      "text": "Example of parallel execution with fork/join semantics."
+    },
+    {
+      "id": "activity-2006",
+      "diagram_type": "activity",
+      "instruction": "Invalid: mixing swimlanes and sequence diagram constructs.",
+      "input": "",
+      "output": "@startuml\n|User|\nstart\nUser -> System : bad mix\nstop\n@enduml",
+      "invalid": true,
+      "explanation": "Swimlanes are allowed in activity diagrams, but sequence-style arrows between named participants are not."
+    },
+    {
+      "id": "activity-2007",
+      "diagram_type": "activity",
+      "instruction": "Valid swimlane example.",
+      "input": "",
+      "output": "@startuml\n|User|\nstart\n:Enter request;\n|System|\n:Process request;\n|User|\n:Receive output;\nstop\n@enduml",
+      "text": "Shows correct use of swimlanes using the |Lane| syntax."
+    },
+    {
+      "id": "activity-2008",
+      "diagram_type": "activity",
+      "instruction": "Enforcing activity-diagram mode with explicit start and stop.",
+      "input": "",
+      "output": "@startuml\nstart\n:Action one;\n:Action two;\nstop\n@enduml",
+      "text": "Explicit start/stop prevents PlantUML from guessing sequence/component modes."
+    },
+    {
+      "id": "activity-2009",
+      "diagram_type": "activity",
+      "instruction": "Invalid: using 'participant' keyword inside an activity diagram.",
+      "input": "",
+      "output": "@startuml\nstart\nparticipant A\n:Do something;\nstop\n@enduml",
+      "invalid": true,
+      "explanation": "The 'participant' keyword belongs only to sequence diagrams, not activity diagrams."
+    },
+    {
+      "id": "activity-2010",
+      "diagram_type": "activity",
+      "instruction": "Valid loop example.",
+      "input": "",
+      "output": "@startuml\nstart\nrepeat\n  :Perform iterative task;\nrepeat while (More?) is (yes)\nstop\n@enduml",
+      "text": "Shows PlantUML repeat/while loop structure in activity diagrams."
     }
   ]
 }
