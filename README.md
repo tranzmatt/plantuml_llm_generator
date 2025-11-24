@@ -13,8 +13,8 @@ This toolkit parses a code repository, retrieves high-quality PlantUML examples 
   - Component, Deployment, Use-case, Object diagrams
 - **Consistent naming** across all diagrams
 - **FAISS RAG** for syntactically correct PlantUML
-- **Multiple backends**: Ollama, vLLM API server, or vLLM Python library
-- **Modular architecture** with shared core components
+- **Two deployment options**: Local vLLM or Ollama
+- **Simple, standalone scripts** - no complex frameworks
 - **Optional validation** using PlantUML CLI
 
 ---
@@ -25,17 +25,21 @@ Choose your deployment model:
 
 ### Option 1: Local vLLM (Recommended for DGX/Single-User)
 
-**Best if:** You have test-vllm-v2.py working, running on your own GPU hardware
+**Best if:** You have GPUs and want maximum quality and performance
 
 ```bash
 # 1. Install dependencies
-pip install faiss-cpu sentence-transformers numpy requests vllm
+pip install -r requirements.txt
+pip install vllm  # Works with CUDA 11.8 and 12.x
 
-# 2. Create RAG index (one-time)
-python create_minimal_rag.py
+# 2. Create RAG index (one-time, requires Ollama for embeddings)
+python util/build_faiss_rag.py \
+  --corpus rag/plantuml_rag_corpus.jsonl \
+  --faiss-index rag/faiss.index \
+  --faiss-meta rag/faiss_meta.json
 
 # 3. Generate diagrams
-python repo_to_diagrams_local_vllm.py \
+python repo_to_diagrams_vllm_local.py \
   --input ~/Code/YourProject \
   --model openai/gpt-oss-120b \
   --tp 4 \
@@ -43,34 +47,44 @@ python repo_to_diagrams_local_vllm.py \
   --faiss-meta rag/faiss_meta.json
 ```
 
-### Option 2: vLLM API Server (Multi-User/Remote)
+### Option 2: Ollama (Easiest Setup)
 
-**Best if:** Multiple users need access or you want a persistent server
+**Best if:** Want simplest installation and quick testing
+
+**Note:** Ollama can run locally (laptop, smaller models) or remotely (DGX, large models like llama4:maverick)
 
 ```bash
-# Start server (once)
-python -m vllm.entrypoints.openai.api_server \
-  --model openai/gpt-oss-120b \
-  --tensor-parallel-size 4 \
-  --port 8000
+# 1. Install Ollama and pull a model
+# Visit https://ollama.ai for installation
+# For local/laptop use (smaller models):
+ollama pull llama3.1:8b
 
-# Generate diagrams (many times)
-python -m cli.repo_to_diagrams \
-  --input ~/Code/YourProject \
-  --backend vllm \
+# OR for remote DGX use (larger models):
+# On the DGX: ollama serve
+# Then: ollama pull llama4:maverick
+
+# 2. Install Python dependencies
+pip install -r requirements.txt
+
+# 3. Create RAG index (one-time, requires Ollama running)
+python util/build_faiss_rag.py \
+  --corpus rag/plantuml_rag_corpus.jsonl \
   --faiss-index rag/faiss.index \
   --faiss-meta rag/faiss_meta.json
-```
 
-### Option 3: Ollama (Easiest Setup)
-
-**Best if:** Want simplest installation and don't need large context windows
-
-```bash
-python -m cli.repo_to_diagrams \
+# 4. Generate diagrams
+# Local Ollama:
+python repo_to_diagrams_ollama.py \
   --input ~/Code/YourProject \
-  --backend ollama \
-  --model llama4:maverick \
+  --llm-model llama3.1:8b \
+  --faiss-index rag/faiss.index \
+  --faiss-meta rag/faiss_meta.json
+
+# OR Remote Ollama (e.g., on DGX):
+python repo_to_diagrams_ollama.py \
+  --input ~/Code/YourProject \
+  --llm-model llama4:maverick \
+  --ollama-url http://192.168.100.100:11434 \
   --faiss-index rag/faiss.index \
   --faiss-meta rag/faiss_meta.json
 ```
@@ -82,7 +96,7 @@ python -m cli.repo_to_diagrams \
 For each repository, generates 8 diagram files:
 
 ```
-uml/
+/path/to/plantum/diagrams/
 ├── project_class.puml       # Class structure & relationships
 ├── project_sequence.puml    # Interaction flows over time
 ├── project_activity.puml    # Process workflows
@@ -95,7 +109,7 @@ uml/
 
 Render them:
 ```bash
-cd uml/
+cd /path/to/plantum/diagrams/
 plantuml *.puml
 ```
 
@@ -109,53 +123,42 @@ plantuml *.puml
 pip install -r requirements.txt
 ```
 
-Includes: faiss-cpu, sentence-transformers, numpy, requests
+This installs: `faiss-cpu`, `sentence-transformers`, `numpy`, `requests`
 
 ### Backend-Specific
 
 **For Local vLLM:**
 ```bash
-pip install vllm  # or vllm-cu12 for CUDA 12
+pip install vllm  # Works with CUDA 11.8 and 12.x
 ```
 
 **For Ollama:**
 ```bash
 # Install from https://ollama.ai/
-ollama pull llama4:maverick
-```
-
-**For GPU Acceleration:**
-```bash
-pip install faiss-gpu  # instead of faiss-cpu
+# Then pull your desired model, for example:
+ollama pull llama3.1:8b        # Smaller model, runs on laptop
+ollama pull llama4:maverick    # Larger model, needs more resources
 ```
 
 ---
 
-## 📂 Directory Structure
+## 📂 Project Structure
 
 ```
 plantuml-rag/
-├── core/                              # Shared modules
-│   ├── repo_scanner.py               # Repository analysis
-│   ├── rag_retriever.py              # FAISS search
-│   ├── prompt_builder.py             # Prompt construction
-│   ├── plantuml_sanitizer.py         # Validation & fixes
-│   ├── diagram_writer.py             # File output
-│   └── utils.py                      # Helpers
+├── repo_to_diagrams_vllm_local.py    # Main script: Local vLLM
+├── repo_to_diagrams_ollama.py        # Main script: Ollama
+├── requirements.txt                   # Python dependencies
 │
-├── llm_backends/                     # Backend clients
-│   ├── ollama_client.py              # Ollama integration
-│   └── vllm_client.py                # vLLM API integration
+├── util/                              # Utility scripts
+│   ├── build_faiss_rag.py            # Build RAG index
+│   ├── test_faiss_query.py           # Test RAG retrieval
+│   └── test_plantuml_vllm.py         # Validate vLLM setup
 │
-├── cli/                              # Command-line tools
-│   ├── repo_to_diagrams.py           # Dual-backend CLI
-│   ├── repo_to_diagrams_vllm.py      # Remove VLLM
-│   └── repo_to_diagrams_local_vllm.py # Local vLLM version
-│
-└── util/                             # Utility tools
-    ├── test_plantuml_vllm.py             # Validation tests
-    ├── create_minimal_rag.py             # RAG index creator
-    └── comparison.py                      # Architecture comparison
+└── rag/                               # RAG data (created by you)
+    ├── plantuml_rag_corpus.jsonl     # Your training data
+    ├── faiss.index                   # FAISS index (generated)
+    └── faiss_meta.json               # Metadata (generated)
 ```
 
 ---
@@ -164,9 +167,12 @@ plantuml-rag/
 
 | Backend | Use Case | Pros | Cons |
 |---------|----------|------|------|
-| **Local vLLM** | Single-user DGX/workstation | Fastest, no server, direct GPU access | Model loads each run |
-| **vLLM Server** | Multi-user, remote access | Persistent model, shared resource | Requires server management |
-| **Ollama** | Quick testing, small projects | Easiest setup, good for exploration | Smaller context windows |
+| **Local vLLM** | Single-user DGX/workstation | Fastest, best quality, direct GPU access | Model loads each run, requires GPU |
+| **Ollama** | Quick testing, flexible deployment | Easiest setup, can run locally or remotely, good model selection | Persistent server needed, HTTP overhead |
+
+**Ollama Deployment Options:**
+- **Local** (laptop/workstation): Smaller models (llama3.1:8b, llama3.2:3b)
+- **Remote** (DGX): Larger models (llama4:maverick, qwen2.5:72b)
 
 ---
 
@@ -175,51 +181,48 @@ plantuml-rag/
 ### Local vLLM (DGX A100 with 4 GPUs)
 
 ```bash
-python repo_to_diagrams_local_vllm.py \
-  --input ~/Code/MyProject \
-  --output ./diagrams \
+python repo_to_diagrams_vllm_local.py \
+  --input /path/to/code/repo \
+  --output /path/to/plantuml/diagrams \
   --model openai/gpt-oss-120b \
   --tp 4 \
-  --max-len 32000 \
+  --max-model-len 32000 \
   --max-tokens 12000 \
   --temperature 0.0 \
-  --rag-examples 8 \
-  --faiss-index rag/faiss.index \
-  --faiss-meta rag/faiss_meta.json \
-  --verbose
-```
-
-### vLLM API Server
-
-```bash
-# Start server (terminal 1)
-python -m vllm.entrypoints.openai.api_server \
-  --model meta-llama/Llama-4-Maverick-17B-128E-Instruct \
-  --tensor-parallel-size 4 \
-  --max-model-len 2000000 \
-  --port 8000
-
-# Generate diagrams (terminal 2)
-python -m cli.repo_to_diagrams \
-  --input ~/Code/MyProject \
-  --backend vllm \
-  --vllm-url http://localhost:8000 \
+  --rag-k 20 \
   --faiss-index rag/faiss.index \
   --faiss-meta rag/faiss_meta.json
 ```
 
 ### Ollama
 
+**Local Ollama (laptop/workstation):**
 ```bash
-# Ensure Ollama is running
+# Start Ollama locally
 ollama serve
 
-# Generate diagrams
-python -m cli.repo_to_diagrams \
+# Generate diagrams with local model
+python repo_to_diagrams_ollama.py \
+  --input /path/to/code/repo \
+  --output /path/to/plantuml/diagrams \
+  --llm-model llama3.1:8b \
+  --rag-k 10 \
+  --faiss-index rag/faiss.index \
+  --faiss-meta rag/faiss_meta.json
+```
+
+**Remote Ollama (e.g., DGX):**
+```bash
+# Ollama running on remote server (e.g., DGX at 192.168.100.100)
+# No local Ollama server needed
+
+# Generate diagrams using remote model
+python repo_to_diagrams_ollama.py \
   --input ~/Code/MyProject \
-  --backend ollama \
-  --model llama4:maverick \
-  --ollama-url http://localhost:11434 \
+  --output ./diagrams \
+  --llm-model llama4:maverick \
+  --ollama-url http://192.168.100.100:11434 \
+  --rag-k 20 \
   --faiss-index rag/faiss.index \
   --faiss-meta rag/faiss_meta.json
 ```
@@ -228,60 +231,66 @@ python -m cli.repo_to_diagrams \
 
 ## 🧠 Creating Your RAG Index
 
-### Quick Start (Minimal Index)
+### Prerequisites
 
-```bash
-python create_minimal_rag.py
+You need a PlantUML corpus in JSONL format (Alpaca-style):
+
+```jsonl
+{"instruction": "Create a class diagram for...", "input": "", "output": "@startuml\n...\n@enduml"}
+{"instruction": "Generate a sequence diagram...", "input": "", "output": "@startuml\n...\n@enduml"}
 ```
 
-Creates a basic index with 16 examples (2 per diagram type). Good for testing.
+The corpus should be saved as `rag/plantuml_rag_corpus.jsonl`.
 
-### Production Index (Recommended)
+### Build the Index
 
-```python
-# build_production_rag.py
-import json
-import faiss
-import numpy as np
-from sentence_transformers import SentenceTransformer
+**Important:** RAG index building requires Ollama to be running (for embeddings), regardless of which backend you'll use for diagram generation.
 
-# Load your PlantUML examples (hundreds/thousands)
-examples = [
-    {
-        "type": "class",
-        "description": "User authentication system",
-        "plantuml": "@startuml\nclass User {...}\n@enduml"
-    },
-    # ... many more examples
-]
+```bash
+# Start Ollama (local or remote)
+ollama serve
 
-# Create embeddings
-model = SentenceTransformer("nomic-embed-text")
-texts = [f"{ex['type']} {ex['description']}" for ex in examples]
-embeddings = model.encode(texts, normalize_embeddings=True)
+# Pull the embedding model if not already available
+ollama pull nomic-embed-text
 
 # Build FAISS index
-dimension = embeddings.shape[1]
-index = faiss.IndexFlatIP(dimension)
-index.add(embeddings.astype('float32'))
-
-# Save
-faiss.write_index(index, "rag/faiss.index")
-with open("rag/faiss_meta.json", "w") as f:
-    json.dump(examples, f, indent=2)
+python util/build_faiss_rag.py \
+  --corpus rag/plantuml_rag_corpus.jsonl \
+  --faiss-index rag/faiss.index \
+  --faiss-meta rag/faiss_meta.json \
+  --embed-model nomic-embed-text \
+  --ollama-url http://localhost:11434
 ```
 
-### Using Existing Training Data
+For remote Ollama:
+```bash
+python util/build_faiss_rag.py \
+  --corpus rag/plantuml_rag_corpus.jsonl \
+  --faiss-index rag/faiss.index \
+  --faiss-meta rag/faiss_meta.json \
+  --embed-model nomic-embed-text \
+  --ollama-url http://192.168.100.100:11434
+```
 
-If you have PlantUML training data from fine-tuning:
+**Environment variables alternative:**
+```bash
+export RAG_CORPUS=rag/plantuml_rag_corpus.jsonl
+export RAG_FAISS_INDEX=rag/faiss.index
+export RAG_FAISS_META=rag/faiss_meta.json
+export RAG_EMBED_MODEL=nomic-embed-text
+export OLLAMA_URL=http://localhost:11434
+
+python util/build_faiss_rag.py
+```
+
+### Test the Index
 
 ```bash
-python repo_to_diagrams_local_vllm.py \
-  --input ~/Code/Project \
-  --faiss-index /path/to/training/faiss.index \
-  --faiss-meta /path/to/training/faiss_meta.json \
-  --model openai/gpt-oss-120b \
-  --tp 4
+python util/test_faiss_query.py \
+  "sequence diagram for async worker queues" \
+  --faiss-index rag/faiss.index \
+  --faiss-meta rag/faiss_meta.json \
+  --top-k 5
 ```
 
 ---
@@ -293,29 +302,28 @@ python repo_to_diagrams_local_vllm.py \
 ```bash
 --model openai/gpt-oss-120b      # Large model (120B)
 --tp 4                            # Use all 4 A100 GPUs
---max-len 65536                   # Large context (80GB per GPU!)
---gpu-memory-utilization 0.95     # Use available memory
+--max-model-len 32000             # Large context
+--gpu-memory-utilization 0.85     # Safe memory usage
 --temperature 0.0                 # Deterministic output
---repetition-penalty 1.1          # Prevent loops
 --max-tokens 12000                # Ample output space
---rag-examples 8                  # High quality
+--rag-k 20                        # High quality RAG examples
 ```
 
 ### Quality vs Speed Tradeoffs
 
 **High Quality (Slow):**
 ```bash
---model openai/gpt-oss-120b --tp 4 --rag-examples 10 --temperature 0.0
+--model openai/gpt-oss-120b --tp 4 --rag-k 20 --temperature 0.0
 ```
 
 **Balanced (Recommended):**
 ```bash
---model openai/gpt-oss-120b --tp 4 --rag-examples 6 --temperature 0.0
+--model openai/gpt-oss-120b --tp 4 --rag-k 10 --temperature 0.0
 ```
 
 **Fast (Testing):**
 ```bash
---model meta-llama/Llama-3-8B-Instruct --tp 1 --rag-examples 3 --no-validate
+--model meta-llama/Llama-3-8B-Instruct --tp 1 --rag-k 5 --temperature 0.1
 ```
 
 ---
@@ -324,18 +332,31 @@ python repo_to_diagrams_local_vllm.py \
 
 ### All Backends
 ```bash
-export PLANTUML_EMBED_MODEL=nomic-embed-text
+export RAG_FAISS_INDEX=rag/faiss.index
+export RAG_FAISS_META=rag/faiss_meta.json
+export RAG_TOP_K=20
 ```
 
-### Ollama
+### Ollama Specific
 ```bash
+# For local Ollama:
 export OLLAMA_URL=http://localhost:11434
-export PLANTUML_LLM_MODEL=llama4:maverick
+export RAG_LLM_MODEL=llama3.1:8b
+export RAG_EMBED_MODEL=nomic-embed-text
+
+# OR for remote Ollama (e.g., DGX):
+export OLLAMA_URL=http://192.168.100.100:11434
+export RAG_LLM_MODEL=llama4:maverick
+export RAG_EMBED_MODEL=nomic-embed-text
 ```
 
-### vLLM Server
+### vLLM Specific
 ```bash
-export VLLM_URL=http://localhost:8000
+export VLLM_MODEL=openai/gpt-oss-120b
+export VLLM_TP=4
+export VLLM_MAX_LEN=32000
+export VLLM_MAX_TOKENS=8000
+export VLLM_TEMPERATURE=0.0
 ```
 
 ---
@@ -345,7 +366,7 @@ export VLLM_URL=http://localhost:8000
 ### Test Local vLLM Setup
 
 ```bash
-python test_plantuml_vllm.py \
+python util/test_plantuml_vllm.py \
   --model openai/gpt-oss-120b \
   --tp 4
 ```
@@ -366,13 +387,13 @@ json                 ✓ PASSED
 
 ```bash
 # Check syntax
-plantuml -checkonly uml/*.puml
+plantuml -checkonly uml_out/*.puml
 
 # Render to PNG
-plantuml uml/*.puml
+plantuml uml_out/*.puml
 
 # Render to SVG (vector)
-plantuml -tsvg uml/*.puml
+plantuml -tsvg uml_out/*.puml
 ```
 
 ---
@@ -388,22 +409,31 @@ plantuml -tsvg uml/*.puml
 | Large | 200-500 | 10-15 minutes |
 | Very Large | 500+ | 20-30 minutes |
 
-### vLLM API Server (Persistent Model)
+### Ollama (varies by model and deployment)
 
+**Local Ollama (llama3.1:8b on laptop):**
 | Repository Size | Files | Generation Time |
 |----------------|-------|-----------------|
-| Small | 10-50 | 1-2 minutes |
-| Medium | 50-200 | 3-5 minutes |
-| Large | 200-500 | 7-12 minutes |
-| Very Large | 500+ | 15-25 minutes |
+| Small | 10-50 | 3-5 minutes |
+| Medium | 50-200 | 8-12 minutes |
+| Large | 200-500 | 15-20 minutes |
+| Very Large | 500+ | 30-40 minutes |
 
-*Assumes model pre-loaded, no startup overhead*
+**Remote Ollama (llama4:maverick on DGX):**
+| Repository Size | Files | Generation Time |
+|----------------|-------|-----------------|
+| Small | 10-50 | 5-8 minutes |
+| Medium | 50-200 | 12-18 minutes |
+| Large | 200-500 | 20-30 minutes |
+| Very Large | 500+ | 40-60 minutes |
+
+*Note: Times include network overhead for remote Ollama*
 
 ---
 
 ## 🐛 Troubleshooting
 
-### "CUDA out of memory"
+### "CUDA out of memory" (vLLM)
 
 **Solutions:**
 ```bash
@@ -411,7 +441,7 @@ plantuml -tsvg uml/*.puml
 --gpu-memory-utilization 0.85
 
 # Reduce context window
---max-len 16000
+--max-model-len 16000
 
 # Use more GPUs
 --tp 4  # instead of 2
@@ -420,7 +450,7 @@ plantuml -tsvg uml/*.puml
 --model meta-llama/Llama-3-8B-Instruct
 ```
 
-### "Model not found"
+### "Model not found" (vLLM)
 
 **Solutions:**
 ```bash
@@ -436,7 +466,7 @@ huggingface-cli download openai/gpt-oss-120b
 **Solutions:**
 ```bash
 # More RAG examples
---rag-examples 8
+--rag-k 20
 
 # Lower temperature
 --temperature 0.0
@@ -445,30 +475,37 @@ huggingface-cli download openai/gpt-oss-120b
 --model openai/gpt-oss-120b
 ```
 
-### "Connection refused" (vLLM Server)
+### "Connection refused" (Ollama)
 
 **Check:**
 ```bash
-# Verify server is running
-curl http://localhost:8000/v1/models
+# Verify Ollama is running
+ollama list
 
-# Check firewall
-netstat -tuln | grep 8000
+# Test endpoint
+curl http://localhost:11434/api/tags
 
-# Test from Python
-python -c "import requests; print(requests.get('http://localhost:8000/v1/models').json())"
+# Start Ollama if needed
+ollama serve
+```
+
+### "No embeddings field" (RAG building)
+
+**Solution:**
+Make sure Ollama is running and the embedding model is pulled:
+```bash
+ollama serve
+ollama pull nomic-embed-text
 ```
 
 ---
 
 ## 📚 Documentation Files
 
-- **[INDEX.md](computer:///mnt/user-data/outputs/INDEX.md)** - File navigation guide
-- **[PACKAGE_SUMMARY.md](computer:///mnt/user-data/outputs/PACKAGE_SUMMARY.md)** - Complete overview
-- **[GETTING_STARTED.md](computer:///mnt/user-data/outputs/GETTING_STARTED.md)** - Setup checklist (15-20 min)
-- **[LOCAL_VLLM_GUIDE.md](computer:///mnt/user-data/outputs/LOCAL_VLLM_GUIDE.md)** - Detailed local vLLM usage
-- **[QUICK_REFERENCE.md](computer:///mnt/user-data/outputs/QUICK_REFERENCE.md)** - Command cheat sheet
-- **[VLLM_SETUP.md](computer:///mnt/user-data/uploads/VLLM_SETUP.md)** - vLLM server installation
+- **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)** - Command cheat sheet
+- **[VLLM_GUIDE.md](VLLM_GUIDE.md)** - Complete vLLM deployment guide
+- **[VLLM_LOCAL_COMPARISON.md](VLLM_LOCAL_COMPARISON.md)** - Ollama vs vLLM comparison
+- **[README.txt](README.txt)** - Quick command examples
 
 ---
 
@@ -479,7 +516,7 @@ python -c "import requests; print(requests.get('http://localhost:8000/v1/models'
 ```bash
 # Use specific GPUs
 export CUDA_VISIBLE_DEVICES=0,1
-python repo_to_diagrams_local_vllm.py --tp 2 ...
+python repo_to_diagrams_vllm_local.py --tp 2 ...
 
 # Monitor GPU usage
 watch -n 1 nvidia-smi
@@ -490,7 +527,7 @@ watch -n 1 nvidia-smi
 ```bash
 #!/bin/bash
 for repo in ~/Code/*/; do
-  python repo_to_diagrams_local_vllm.py \
+  python repo_to_diagrams_vllm_local.py \
     --input "$repo" \
     --output "./diagrams/$(basename $repo)" \
     --model openai/gpt-oss-120b \
@@ -500,45 +537,23 @@ for repo in ~/Code/*/; do
 done
 ```
 
-### Custom Embedding Models
+### Remote Ollama Server
+
+Use Ollama running on a remote server (e.g., DGX) for larger models:
 
 ```bash
---embed-model sentence-transformers/all-mpnet-base-v2
-# or
---embed-model intfloat/e5-large-v2
+# Point to remote Ollama server
+python repo_to_diagrams_ollama.py \
+  --input ~/Code/Project \
+  --ollama-url http://192.168.100.100:11434 \
+  --llm-model llama4:maverick \
+  --faiss-index rag/faiss.index \
+  --faiss-meta rag/faiss_meta.json
 ```
 
----
-
-## 🧩 Extending the System
-
-### Add New Diagram Types
-
-Edit `core/prompt_builder.py`:
-```python
-diagram_types = [
-    "class", "sequence", "activity", "state",
-    "component", "deployment", "usecase", "object",
-    "timing",  # Add new type
-]
-```
-
-### Support New Languages
-
-Create new scanner in `core/`:
-```python
-# core/java_scanner.py
-def scan_java_repo(root: str) -> List[str]:
-    return [f for f in glob(f"{root}/**/*.java", recursive=True)]
-```
-
-### Custom Prompt Styles
-
-Modify `core/prompt_builder.py`:
-```python
-def build_system_prompt() -> str:
-    return "You are an expert PlantUML generator with a focus on..."
-```
+**Common setup:**
+- **DGX/Server**: Runs Ollama with large models (llama4:maverick, qwen2.5:72b)
+- **Laptop/Workstation**: Runs the Python scripts, connects to remote Ollama
 
 ---
 
@@ -546,48 +561,32 @@ def build_system_prompt() -> str:
 
 | Model | Size | Context | Quality | Speed | Best For |
 |-------|------|---------|---------|-------|----------|
-| GPT-OSS-120B | 120B | 2M | ⭐⭐⭐⭐⭐ | ⭐⭐ | Production, large repos |
-| Llama-4-Maverick-17B | 17B | 128K | ⭐⭐⭐⭐ | ⭐⭐⭐ | Balanced quality/speed |
-| Llama-4-Scout-17B | 17B | 128K | ⭐⭐⭐ | ⭐⭐⭐⭐ | Fast testing |
-| Llama-3-8B | 8B | 8K | ⭐⭐ | ⭐⭐⭐⭐⭐ | Quick prototypes |
+| GPT-OSS-120B | 120B | 2M | ⭐⭐⭐⭐⭐ | ⭐⭐ | Production, large repos (vLLM only) |
+| Llama-4-Maverick-17B | 17B | 128K | ⭐⭐⭐⭐ | ⭐⭐⭐ | Balanced quality/speed (vLLM only) |
+| llama4:maverick | N/A | 128K | ⭐⭐⭐⭐ | ⭐⭐⭐ | Large repos (Ollama, needs DGX/server) |
+| llama3.1:8b | 8B | 128K | ⭐⭐⭐ | ⭐⭐⭐⭐ | Quick testing (Ollama, runs locally) |
+| Llama-3-8B | 8B | 8K | ⭐⭐ | ⭐⭐⭐⭐ | Quick prototypes (vLLM only) |
+
+**Ollama Model Selection:**
+- **Local (laptop)**: llama3.1:8b, llama3.2:3b, qwen2.5:7b
+- **Remote (DGX/server)**: llama4:maverick, qwen2.5:72b, command-r-plus
 
 **Priority:** Correctness > Speed. Larger models generate more accurate PlantUML.
-
----
-
-## 🎓 Learning Path
-
-### First Time User?
-1. Read [GETTING_STARTED.md](computer:///mnt/user-data/outputs/GETTING_STARTED.md)
-2. Run `python create_minimal_rag.py`
-3. Run `python test_plantuml_vllm.py --model openai/gpt-oss-120b --tp 4`
-4. Generate your first diagrams!
-
-### Understanding Architecture?
-1. Run `python comparison.py` to see how components fit together
-2. Review the modular structure in `core/`
-3. Check `llm_backends/` for backend implementations
-
-### Production Deployment?
-1. Build comprehensive RAG index (500+ examples per type)
-2. Optimize parameters for your hardware
-3. Set up batch processing scripts
-4. Configure monitoring and logging
 
 ---
 
 ## 💬 FAQ
 
 **Q: Which backend should I use?**
-- Local vLLM if you have test-vllm-v2.py working (single-user)
-- vLLM server if multiple users need access
-- Ollama for quick testing/exploration
+- **Local vLLM**: Best quality and speed on DGX/GPU workstation for single-user use
+- **Ollama (local)**: Quick testing with smaller models on laptop/workstation
+- **Ollama (remote)**: Access large models on DGX from any machine, easiest setup
 
-**Q: How does this relate to my test-vllm-v2.py?**
-Run `python comparison.py` - the vLLM core is identical!
+**Q: How do I create a corpus?**
+You need to prepare your own PlantUML training data in JSONL format. See the "Creating Your RAG Index" section.
 
 **Q: Can I use my fine-tuning training data?**
-Yes! Point `--faiss-index` and `--faiss-meta` to your training data.
+Yes! If you have training data in the Alpaca format with PlantUML examples, just point `--corpus` to it.
 
 **Q: How much VRAM do I need?**
 - 120B model: 4x A100 (80GB) or 8x A100 (40GB)
@@ -595,7 +594,10 @@ Yes! Point `--faiss-index` and `--faiss-meta` to your training data.
 - 8B model: 1x RTX 3090/4090 (24GB)
 
 **Q: Can I generate diagrams for non-Python code?**
-Yes - extend `core/repo_scanner.py` for your language.
+Yes - extend the `walk_repo_collect_code()` function in the scripts to include your language's file extensions.
+
+**Q: Why does vLLM use V1 engine?**
+The V1 engine is more stable for large models (70B+) on multi-GPU setups. The script automatically configures this.
 
 ---
 
@@ -607,15 +609,24 @@ MIT License – use freely, no warranty provided.
 
 ## 🎉 Summary
 
-**If you have test-vllm-v2.py working:**
+**For best quality on DGX (single-user):**
 1. Install dependencies (5 min)
-2. Create RAG index (2 min)
-3. Generate diagrams (5-10 min)
+2. Build RAG index from your corpus (5 min)
+3. Generate diagrams with local vLLM (5-15 min)
 
-**Total time: 15-20 minutes to production-quality UML diagrams!**
+**For remote access to DGX models:**
+1. Run Ollama on DGX (e.g., llama4:maverick)
+2. Install dependencies on laptop (2 min)
+3. Build RAG index (5 min)
+4. Generate diagrams via remote Ollama (10-20 min)
 
-Start with [GETTING_STARTED.md](computer:///mnt/user-data/outputs/GETTING_STARTED.md) →
+**For quick local testing:**
+1. Install Ollama locally with small model (2 min)
+2. Build RAG index (5 min)
+3. Generate diagrams (10-15 min)
+
+**Total time: 15-30 minutes to production-quality UML diagrams!**
 
 ---
 
-**Questions?** Check [INDEX.md](computer:///mnt/user-data/outputs/INDEX.md) for navigation or [QUICK_REFERENCE.md](computer:///mnt/user-data/outputs/QUICK_REFERENCE.md) for commands.
+**Questions?** Check [QUICK_REFERENCE.md](QUICK_REFERENCE.md) for commands or [VLLM_GUIDE.md](VLLM_GUIDE.md) for detailed setup.
