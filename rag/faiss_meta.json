@@ -1,6 +1,6 @@
 {
   "embed_model": "nomic-embed-text",
-  "corpus_path": "/home/mclark/Code/UML/PlantUML-RAG/rag/plantuml_rag_corpus.jsonl",
+  "corpus_path": "/home/mclark/Code/UML/plantuml_llm_generator/rag/plantuml_rag_corpus_merged.jsonl",
   "documents": [
     {
       "id": "ex-00001",
@@ -5779,6 +5779,205 @@
       "input": "",
       "output": "@startuml\nactor User\n\n(Enter Credentials) as creds\n(Validate Credentials) as validate\n(Grant Access) as access\n(Deny Access) as deny\n\nUser --> creds\ncreds --> validate\nvalidate --> access : valid\nvalidate --> deny : invalid\n\nnote right of validate\n  Checks username and\n  password against database\nend note\n@enduml",
       "text": "Diagram type: usecase\nInstruction: Create a PlantUML use case diagram showing authentication flow\nPlantUML output:\n@startuml\nactor User\n\n(Enter Credentials) as creds\n(Validate Credentials) as validate\n(Grant Access) as access\n(Deny Access) as deny\n\nUser --> creds\ncreds --> validate\nvalidate --> access : valid\nvalidate --> deny : invalid\n\nnote right of validate\n  Checks username and\n  password against database\nend note\n@enduml"
+    },
+    {
+      "id": "rag-rabbitmq-basic",
+      "diagram_type": "component",
+      "source_file": "rag_append",
+      "instruction": "Pattern: valid RabbitMQ component syntax",
+      "input": "",
+      "output": "@startuml\nskinparam componentStyle rectangle\ncomponent \"RabbitMQ Broker\" as RabbitMQ {\n  [image_queue]\n  [name_queue]\n  [bio_queue]\n  [pictures_queue]\n  [social_queue]\n  [result_queue]\n}\n\nnote right of RabbitMQ\n  Exchanges (fanout, direct, topic) are conceptual.\n  Represent them as separate components.\n  Avoid stereotypes like <<fanout>>.\nend note\n@enduml"
+    },
+    {
+      "id": "rag-rabbitmq-exchange-valid",
+      "diagram_type": "component",
+      "source_file": "rag_append",
+      "instruction": "Example: valid exchange representation without stereotypes",
+      "input": "",
+      "output": "@startuml\ncomponent \"RabbitMQ Broker\" as RabbitMQ\ncomponent \"Fanout Exchange\" as Fanout\n\nFanout -down-> [image_queue]\nFanout -down-> [name_queue]\nFanout -down-> [bio_queue]\nFanout -down-> [pictures_queue]\nFanout -down-> [social_queue]\nFanout -down-> [result_queue]\n\nnote right of Fanout\n  Exchanges must be independent components.\n  Do NOT use stereotypes like <<fanout>>.\nend note\n@enduml"
+    },
+    {
+      "id": "rag-rabbitmq-invalid-example",
+      "diagram_type": "component",
+      "source_file": "rag_append",
+      "instruction": "Invalid syntax example to avoid",
+      "input": "",
+      "output": "@startuml\ncomponent RabbitMQBroker {\n  exchange celebrity_names <<fanout>>\n}\n@enduml",
+      "text": "Invalid syntax: stereotypes cannot be applied to nested elements. Use separate components."
+    },
+    {
+      "id": "rag-rabbitmq-repair",
+      "diagram_type": "component",
+      "source_file": "rag_append",
+      "instruction": "Repaired version of invalid exchange syntax",
+      "input": "",
+      "output": "@startuml\ncomponent \"RabbitMQ Broker\" as RabbitMQ {\n  [image_queue]\n  [name_queue]\n  [bio_queue]\n  [pictures_queue]\n  [social_queue]\n  [result_queue]\n}\n\ncomponent \"Celebrity Names Exchange\" as CelebrityExchange\nCelebrityExchange -down-> [image_queue]\nCelebrityExchange -down-> [name_queue]\nCelebrityExchange -down-> [bio_queue]\nCelebrityExchange -down-> [pictures_queue]\nCelebrityExchange -down-> [social_queue]\nCelebrityExchange -down-> [result_queue]\n\nnote right of CelebrityExchange\n  Correct modeling of exchange.\n  No invalid stereotypes.\nend note\n@enduml"
+    },
+    {
+      "id": "rag-plantuml-component-rules",
+      "diagram_type": "component",
+      "source_file": "rag_append",
+      "instruction": "Rules for valid PlantUML component syntax",
+      "input": "",
+      "output": "@startuml\ncomponent ServiceA\ncomponent \"User Interface\" as UI\ncomponent Backend {\n  [InternalQueue]\n  [Worker]\n}\n\nnote bottom\n  Rules:\n  1. Stereotypes only apply to components, not nested items.\n  2. Nested items must be [Elements], not typed declarations.\n  3. Queues should use [queue_name] form.\n  4. Do NOT invent syntax like: exchange X <<fanout>>.\nend note\n@enduml"
+    },
+    {
+      "id": "deploy-0001",
+      "diagram_type": "deployment",
+      "source_file": "rag_deployment_patch.jsonl",
+      "instruction": "Correct grouping of nodes in a deployment diagram using a cloud environment.",
+      "input": "",
+      "output": "@startuml\nnode \"Cloud Environment\" {\n  node AppA\n  node AppB\n}\nAppA --> AppB\n@enduml",
+      "text": "Demonstrates valid deployment syntax: grouping nodes inside node{\"Cloud Environment\"}. Cloud{} does NOT accept node declarations."
+    },
+    {
+      "id": "deploy-0002",
+      "diagram_type": "deployment",
+      "source_file": "rag_deployment_patch.jsonl",
+      "instruction": "Show difference between cloud component grouping and node deployment grouping.",
+      "input": "",
+      "output": "@startuml\ncloud \"CDN\" {\n  [Static Content]\n}\n\nnode \"Compute Cluster\" {\n  node Backend\n}\n\nBackend --> [Static Content]\n@enduml",
+      "text": "cloud{} only supports component-like elements. node{} must be used for deployment nodes. Demonstrates correct mixed usage."
+    },
+    {
+      "id": "deploy-0003",
+      "diagram_type": "deployment",
+      "source_file": "rag_deployment_patch.jsonl",
+      "instruction": "Deployment diagram containing multiple services and RabbitMQ queues.",
+      "input": "",
+      "output": "@startuml\nnode \"RabbitMQ Broker\" as RabbitMQ {\n  artifact queue_a\n  artifact queue_b\n  artifact queue_c\n}\n\nnode ServiceA\nnode ServiceB\nnode ServiceC\n\nServiceA --> queue_a\nServiceB --> queue_b\nServiceC --> queue_c\n@enduml",
+      "text": "Queues should be represented as artifacts inside a node block. Valid deployment representation of a message broker."
+    },
+    {
+      "id": "deploy-0004",
+      "diagram_type": "deployment",
+      "source_file": "rag_deployment_patch.jsonl",
+      "instruction": "Invalid example: cloud grouping with node declarations.",
+      "input": "",
+      "output": "@startuml\ncloud \"Cloud\" {\n  node AppA\n}\n@enduml",
+      "invalid": true,
+      "explanation": "PlantUML rejects node declarations inside cloud{}. This forces fallback to component mode, causing syntax errors."
+    },
+    {
+      "id": "deploy-0005",
+      "diagram_type": "deployment",
+      "source_file": "rag_deployment_patch.jsonl",
+      "instruction": "Invalid syntax: RabbitMQ exchange stereotype misuse.",
+      "input": "",
+      "output": "@startuml\ncomponent RabbitMQBroker {\n  exchange celebrity_names <<fanout>>\n}\n@enduml",
+      "invalid": true,
+      "explanation": "PlantUML does not support nested elements with stereotypes such as <<fanout>>. Exchanges must be separate components or artifacts."
+    },
+    {
+      "id": "deploy-0006",
+      "diagram_type": "deployment",
+      "source_file": "rag_deployment_patch.jsonl",
+      "instruction": "Corrected exchange modeling in deployment diagrams.",
+      "input": "",
+      "output": "@startuml\nnode \"RabbitMQ Broker\" as RabbitMQ {\n  artifact image_queue\n  artifact name_queue\n  artifact bio_queue\n}\n\nnode \"Celebrity Fanout Exchange\" as Fanout\nFanout --> image_queue\nFanout --> name_queue\nFanout --> bio_queue\n@enduml",
+      "text": "Exchanges should be modeled as separate nodes or components, not stereotypes. Demonstrates valid queue routing pattern."
+    },
+    {
+      "id": "deploy-0007",
+      "diagram_type": "deployment",
+      "source_file": "rag_deployment_patch.jsonl",
+      "instruction": "Minimal deployment diagram with proper syntax and mode enforcement.",
+      "input": "",
+      "output": "@startuml\nnode ServerA\nnode ServerB\nServerA --> ServerB\n@enduml",
+      "text": "PlantUML requires at least one link to reliably infer deployment mode instead of component mode."
+    },
+    {
+      "id": "deploy-0008",
+      "diagram_type": "deployment",
+      "source_file": "rag_deployment_patch.jsonl",
+      "instruction": "Full multi-service cloud deployment with message broker (fixed version).",
+      "input": "Celebrity recognition pipeline using RabbitMQ and external APIs.",
+      "output": "@startuml\nskinparam node {\n  BackgroundColor #F8F8E8\n  BorderColor #555555\n}\n\ntitle Celebrity Recognition System - Deployment Diagram\n\nnode \"Cloud Environment\" as Cloud {\n  node \"Gradio Interface App\" as GradioInterfaceApp\n  node \"Celebrity Recognition App\" as CelebrityRecognitionApp\n  node \"Information Assembler App\" as InformationAssemblerApp\n  node \"Bio Retrieval App\" as BioRetrievalApp\n  node \"Social Media Retrieval App\" as SocialMediaApp\n  node \"Recent Pictures Retrieval App\" as RecentPicturesRetrievalApp\n\n  node \"RabbitMQ Broker\" as RabbitMQ {\n    artifact image_queue\n    artifact name_queue\n    artifact bio_queue\n    artifact pictures_queue\n    artifact social_queue\n    artifact result_queue\n  }\n}\n\ncloud \"External APIs\" as External {\n  node \"Image Recognition API\" as ImageAPI\n  node \"Wikipedia Infobox API\" as WikiAPI\n  node \"Social Media API\" as SocialAPI\n}\n\nGradioInterfaceApp --> RabbitMQ : publish images / receive results\nCelebrityRecognitionApp --> RabbitMQ : consume images / publish names\nBioRetrievalApp --> RabbitMQ : consume names / publish bios\nSocialMediaApp --> RabbitMQ : consume names / publish social info\nRecentPicturesRetrievalApp --> RabbitMQ : consume names / publish pictures\nInformationAssemblerApp --> RabbitMQ : consume all / publish results\n\nCelebrityRecognitionApp --> ImageAPI : HTTP POST\nBioRetrievalApp --> WikiAPI : HTTP GET\nSocialMediaApp --> SocialAPI : HTTP GET\n@enduml",
+      "text": "This is a canonical example of a large deployment diagram. Shows correct grouping, valid queue representation, external APIs, and required links."
+    },
+    {
+      "id": "activity-2001",
+      "diagram_type": "activity",
+      "instruction": "Minimal valid PlantUML activity diagram.",
+      "input": "",
+      "output": "@startuml\nstart\n:Do something;\nstop\n@enduml",
+      "text": "Smallest valid activity diagram showing start, one action, and stop."
+    },
+    {
+      "id": "activity-2002",
+      "diagram_type": "activity",
+      "instruction": "Invalid: activity diagram using sequence-diagram arrows.",
+      "input": "",
+      "output": "@startuml\nstart\nA -> B : wrong arrow\nstop\n@enduml",
+      "invalid": true,
+      "explanation": "Activity diagrams do not use participants or arrows. Only action boxes, transitions, and control structures are allowed."
+    },
+    {
+      "id": "activity-2003",
+      "diagram_type": "activity",
+      "instruction": "Valid use of decision and merge nodes.",
+      "input": "",
+      "output": "@startuml\nstart\n:Check condition;\nif (Valid?) then (yes)\n  :Process yes path;\nelse (no)\n  :Process no path;\nendif\nstop\n@enduml",
+      "text": "Shows proper if/else syntax for PlantUML activity diagrams."
+    },
+    {
+      "id": "activity-2004",
+      "diagram_type": "activity",
+      "instruction": "Invalid: using ':' labels without semicolons.",
+      "input": "",
+      "output": "@startuml\nstart\n:Missing semicolon\nstop\n@enduml",
+      "invalid": true,
+      "explanation": "PlantUML requires action boxes to end with semicolons. Without one, the diagram fails to parse."
+    },
+    {
+      "id": "activity-2005",
+      "diagram_type": "activity",
+      "instruction": "Valid fork/join concurrency example.",
+      "input": "",
+      "output": "@startuml\nstart\nfork\n  :Task A;\nfork again\n  :Task B;\nend fork\n:Continue;\nstop\n@enduml",
+      "text": "Example of parallel execution with fork/join semantics."
+    },
+    {
+      "id": "activity-2006",
+      "diagram_type": "activity",
+      "instruction": "Invalid: mixing swimlanes and sequence diagram constructs.",
+      "input": "",
+      "output": "@startuml\n|User|\nstart\nUser -> System : bad mix\nstop\n@enduml",
+      "invalid": true,
+      "explanation": "Swimlanes are allowed in activity diagrams, but sequence-style arrows between named participants are not."
+    },
+    {
+      "id": "activity-2007",
+      "diagram_type": "activity",
+      "instruction": "Valid swimlane example.",
+      "input": "",
+      "output": "@startuml\n|User|\nstart\n:Enter request;\n|System|\n:Process request;\n|User|\n:Receive output;\nstop\n@enduml",
+      "text": "Shows correct use of swimlanes using the |Lane| syntax."
+    },
+    {
+      "id": "activity-2008",
+      "diagram_type": "activity",
+      "instruction": "Enforcing activity-diagram mode with explicit start and stop.",
+      "input": "",
+      "output": "@startuml\nstart\n:Action one;\n:Action two;\nstop\n@enduml",
+      "text": "Explicit start/stop prevents PlantUML from guessing sequence/component modes."
+    },
+    {
+      "id": "activity-2009",
+      "diagram_type": "activity",
+      "instruction": "Invalid: using 'participant' keyword inside an activity diagram.",
+      "input": "",
+      "output": "@startuml\nstart\nparticipant A\n:Do something;\nstop\n@enduml",
+      "invalid": true,
+      "explanation": "The 'participant' keyword belongs only to sequence diagrams, not activity diagrams."
+    },
+    {
+      "id": "activity-2010",
+      "diagram_type": "activity",
+      "instruction": "Valid loop example.",
+      "input": "",
+      "output": "@startuml\nstart\nrepeat\n  :Perform iterative task;\nrepeat while (More?) is (yes)\nstop\n@enduml",
+      "text": "Shows PlantUML repeat/while loop structure in activity diagrams."
     }
   ]
 }
