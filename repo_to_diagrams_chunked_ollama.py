@@ -261,16 +261,94 @@ def build_entity_registry(extractions, repo_name, model, ollama_url, num_ctx):
 
 GENERATION_SYSTEM = (
     "You are an expert in Python static analysis and UML architecture. "
-    "Generate high-quality PlantUML 1.2025.0 diagrams. "
+    "Generate high-quality PlantUML 1.2025.10 diagrams. "
     "You MUST use ONLY the canonical names from the Entity Registry. "
     "Never invent new class or component names. "
-    "Output ONLY the @startuml...@enduml block."
+    "Output ONLY the @startuml...@enduml block — no explanation, no markdown fences.\n\n"
+    "STRICT PLANTUML 1.2025.10 SYNTAX RULES:\n"
+    "- Activity diagrams: ALWAYS use modern syntax: start/stop, :action;, "
+      "if (cond) then (yes) / else (no) / endif, fork/fork again/end fork. "
+      "NEVER use legacy (*) --> syntax.\n"
+    "- State diagrams: transitions use '--> StateName : label' format. "
+      "NEVER use -->|label| syntax — that is Mermaid, not PlantUML.\n"
+    "- Use case diagrams: rectangle names containing spaces MUST be quoted: "
+      'rectangle "My Service" { }. Unquoted multi-word names are a syntax error.\n'
+    "- Class diagrams: use <|-- for inheritance, *-- for composition, o-- for aggregation.\n"
+    "- Sequence diagrams: participants declared with 'participant \"Name\" as alias' "
+      "before use. Arrows use -> and -->.\n"
+    "- All multi-word names in any diagram MUST be quoted with double quotes."
 )
 
+DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
+    "activity": (
+        "Use ONLY modern activity syntax:\n"
+        "  start / stop / kill\n"
+        "  :Action label;\n"
+        "  if (condition?) then (yes)\n"
+        "    :action;\n"
+        "  else (no)\n"
+        "    :action;\n"
+        "  endif\n"
+        "  fork / fork again / end fork\n"
+        "  repeat / repeat while (condition?)\n"
+        "  while (condition?) / endwhile\n"
+        "NEVER use (*) --> or --> (*) legacy syntax."
+    ),
+    "state": (
+        "Correct transition syntax: StateName --> OtherState : label\n"
+        "NEVER write -->|label| — that is Mermaid syntax and will fail.\n"
+        "Composite states: state StateName { [*] --> SubState }\n"
+        "Entry/exit points use [*]."
+    ),
+    "usecase": (
+        "Any rectangle or package name with spaces MUST be double-quoted:\n"
+        '  rectangle "My Service Name" {\n'
+        "  }\n"
+        "actor names with spaces must also be quoted: actor \"End User\" as u\n"
+        "usecase names with spaces must be quoted: usecase \"Do Something\" as UC1"
+    ),
+    "class": (
+        "Inheritance: Child <|-- Parent\n"
+        "Composition: ClassA *-- ClassB\n"
+        "Aggregation: ClassA o-- ClassB\n"
+        "Association: ClassA --> ClassB\n"
+        "Class members: + public, - private, # protected, ~ package"
+    ),
+    "sequence": (
+        "Declare all participants at the top before any arrows.\n"
+        'participant "Name" as alias\n'
+        "Synchronous call: A -> B : message\n"
+        "Return: B --> A : response\n"
+        "Activation: activate B / deactivate B\n"
+        "Groups: group, alt/else/end, loop, opt"
+    ),
+    "component": (
+        "Components: component \"Name\" as alias\n"
+        "Interfaces: interface \"Name\" as alias\n"
+        "Packages/frames with spaces must be quoted.\n"
+        "Links: A --> B, A ..> B (dependency), A -( B (usage)"
+    ),
+    "deployment": (
+        "Nodes/clouds/frames with spaces must be quoted.\n"
+        'node "My Node" { }\n'
+        'cloud "AWS" { }\n'
+        "Artifacts: artifact \"app.jar\"\n"
+        "Links: A --> B : label"
+    ),
+    "object": (
+        "Object instances: object \"instanceName : ClassName\" as alias\n"
+        "Field values: alias : field = value\n"
+        "Links same as class diagram."
+    ),
+}
+
 GENERATION_TMPL = """\
-Generate a PlantUML 1.2025.0 {dtype_upper} diagram for '{repo_name}'.
+Generate a PlantUML 1.2025.10 {dtype_upper} diagram for '{repo_name}'.
 
 {description}
+
+=== SYNTAX RULES FOR THIS DIAGRAM TYPE ===
+{syntax_hint}
 
 === CANONICAL ENTITY REGISTRY (authoritative names — do not deviate) ===
 {registry_json}
@@ -283,6 +361,7 @@ Generate a PlantUML 1.2025.0 {dtype_upper} diagram for '{repo_name}'.
 
 Output ONLY the @startuml...@enduml block.
 """
+
 
 def select_chunks(diagram_type, files, registry, budget=24_000):
     entry_set = set(registry.get("entry_points", []))
@@ -308,7 +387,10 @@ def select_chunks(diagram_type, files, registry, budget=24_000):
 def generate_diagram(dtype, desc, repo_name, registry, files, rag_examples,
                      model, ollama_url, num_ctx):
     user_msg = GENERATION_TMPL.format(
-        dtype_upper=dtype.upper(), repo_name=repo_name, description=desc,
+        dtype_upper=dtype.upper(),
+        repo_name=repo_name,
+        description=desc,
+        syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),   # ← add this
         registry_json=json.dumps(registry, indent=2),
         code_chunks=select_chunks(dtype, files, registry),
         rag_examples=rag_examples,
