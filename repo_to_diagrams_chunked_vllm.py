@@ -88,6 +88,11 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         'Use case names with spaces must be quoted: usecase "Do Something" as UC1'
     ),
     "class": (
+        "STRICT CLASS-ONLY OUTPUT (no mixing):\n"
+        "- Use ONLY: class, abstract class, interface, enum, package, namespace, note, hide/show, skinparam.\n"
+        "- Do NOT use: component, participant, node, queue, cloud, artifact, rectangle, frame, actor, object.\n"
+        "- Do NOT use allowmixing.\n"
+        "\n"
         "Inheritance: Child <|-- Parent\n"
         "Composition: ClassA *-- ClassB\n"
         "Aggregation: ClassA o-- ClassB\n"
@@ -97,28 +102,37 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
     "sequence": (
         "Declare all participants at the top before any arrows.\n"
         'participant "Name" as alias\n'
-        "Sync call: A -> B : message\n"
+        "Sync call: A -> B : message   (NEVER use ->>)\n"
         "Return:    B --> A : response\n"
         "activate B / deactivate B\n"
-        "Groups: alt/else/end, loop, opt"
+        "Groups: alt/else/end, loop, opt\n"
+        "\n"
+        "External systems/APIs MUST be declared as participants too (do not reference undeclared names)."
     ),
     "component": (
         'component "My Component" as alias\n'
         'interface "My API" as api\n'
         'queue "message_queue" as mq\n'
-        '\n'
+        "\n"
         "Declare ALL elements before edges.\n"
         "Edges must use --> or ..> only.\n"
         "Never use .>.\n"
         "Never create new keywords like exchange or topic.\n"
         "Represent messaging exchanges as stereotypes:\n"
         'queue "celebrity_names" <<exchange>>\n'
+        "\n"
+        "Do NOT declare elements inline on edges (e.g. A --> interface \"X\" as x). Declare first, then connect."
     ),
     "deployment": (
         'Nodes/clouds/frames with spaces must be quoted: node "My Node" { }\n'
         'cloud "AWS" { }\n'
+        'frame "VPC" { }\n'
         "Artifacts: artifact \"app.jar\"\n"
-        "Links: A --> B : label"
+        "Links: A --> B : label\n"
+        "\n"
+        "Do NOT use the keyword 'exchange'. If you need it, declare a queue with stereotype:\n"
+        'queue "celebrity_names" <<exchange>>\n'
+        "Do NOT declare elements inline on edges; declare first, then connect."
     ),
     "object": (
         'Object instances: object "instanceName : ClassName" as alias\n'
@@ -336,11 +350,17 @@ GENERATION_SYSTEM = (
     "Output ONLY the @startuml...@enduml block.\n\n"
 
     "PLANTUML VALIDATION CONTRACT:\n"
-    "- Every line must begin with a valid PlantUML keyword or alias.\n"
-    "- Allowed element keywords: component, interface, database, cloud, node, "
-    "artifact, actor, package, rectangle, frame, queue, participant, object.\n"
+    "- Never output PlantUML error text.\n"
+    "- Never reference undeclared elements/aliases.\n"
+    "- Every element must be declared before it is used in an edge.\n"
+    "- Do NOT declare elements inline on edges.\n"
+    "- Forbidden legacy/mistyped tokens: 'exchange' keyword, '.>' arrows, '->>' arrows.\n\n"
+
+    "ALLOWED KEYWORDS (global):\n"
+    "- component, interface, database, cloud, node, artifact, actor, package, rectangle, frame, queue,\n"
+    "  participant, object, class, enum, note, skinparam, title, legend, left to right direction.\n"
     "- Forbidden keywords: exchange, topic, fanout, pubsub, service, lambda.\n"
-    "- If a domain concept requires one of those, represent it using a stereotype:\n"
+    "- If you need an exchange/topic concept, represent it as a queue with a stereotype:\n"
     "  queue \"X\" <<exchange>>\n\n"
 
     "EDGE RULES:\n"
@@ -376,6 +396,22 @@ Generate a PlantUML 1.2025.10 {dtype_upper} diagram for '{repo_name}'.
 Output ONLY the @startuml...@enduml block.
 """
 
+REPAIR_TMPL = """\
+Your previous PlantUML for diagram type {dtype_upper} failed validation for PlantUML 1.2025.10.
+
+Validation errors:
+{errors}
+
+Rewrite the ENTIRE diagram to satisfy ALL constraints.
+- Output ONLY one @startuml...@enduml block.
+- Declare all elements first, then edges.
+- Do not use 'exchange' keyword; use queue stereotypes instead.
+- Never use '.>' or '->>' arrows.
+- Do not mix unrelated element types for this diagram type.
+
+Previous output:
+{previous}
+"""
 
 # ===========================================================================
 # JSON parsing helper
@@ -394,6 +430,74 @@ def _parse_json(raw: str) -> Optional[Dict]:
             except json.JSONDecodeError:
                 pass
     return None
+
+
+# ===========================================================================
+# PlantUML validation helpers (lightweight; targets the failures we've seen)
+# ===========================================================================
+
+_FORBIDDEN_LINE_RE = [
+    re.compile(r"^\s*exchange\b", re.IGNORECASE),  # keyword 'exchange' (not stereotype)
+]
+
+_FORBIDDEN_SUBSTRINGS = [
+    "->>",   # sequence invalid here per contract
+    ".>",    # invalid arrow; PlantUML uses ..> not .>
+]
+
+# Lines that indicate inline declaration on edges (e.g. A --> component "X" as X)
+_INLINE_DECL_RE = re.compile(
+    r"(-->|<--|<-->|\.{2}>|<\.{2}|\*--|o--|<\|--|--\|>)\s*(component|interface|queue|node|cloud|artifact|database|participant|actor|object|class|rectangle|frame)\b",
+    re.IGNORECASE,
+)
+
+# Class diagrams should not mix these element types (we want to avoid allowmixing)
+_CLASS_MIXED_RE = re.compile(
+    r"^\s*(component|participant|node|queue|cloud|artifact|rectangle|frame|actor|object)\b",
+    re.IGNORECASE,
+)
+
+def extract_start_end_block(raw: str) -> str:
+    m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
+    if m:
+        return m.group(0).strip()
+    if raw.strip():
+        return f"@startuml\n{raw.strip()}\n@enduml"
+    return ""
+
+def validate_puml(diagram_type: str, puml: str) -> List[str]:
+    errors: List[str] = []
+    if not puml.strip():
+        return ["empty output"]
+
+    lines = puml.splitlines()
+    for i, line in enumerate(lines, start=1):
+        # ignore @startuml/@enduml and blank lines
+        if not line.strip() or line.strip().startswith("@startuml") or line.strip().startswith("@enduml"):
+            continue
+
+        for rx in _FORBIDDEN_LINE_RE:
+            if rx.search(line):
+                errors.append(f"line {i}: forbidden keyword usage: {line.strip()}")
+                break
+
+        for s in _FORBIDDEN_SUBSTRINGS:
+            if s in line:
+                errors.append(f"line {i}: forbidden token '{s}': {line.strip()}")
+                break
+
+        if _INLINE_DECL_RE.search(line):
+            errors.append(f"line {i}: inline element declaration on edge: {line.strip()}")
+
+        if diagram_type == "class" and _CLASS_MIXED_RE.search(line):
+            errors.append(f"line {i}: mixed non-class element in class diagram: {line.strip()}")
+
+        if diagram_type == "sequence":
+            # sequence must use -> not ->> (already caught), also discourage missing participant declarations,
+            # but we keep this lightweight (we don't parse fully).
+            pass
+
+    return errors
 
 
 # ===========================================================================
@@ -527,6 +631,7 @@ def pass3_generate_all(
 ) -> Dict[str, str]:
     """
     Build all 8 diagram prompts, submit as one batch.
+    If a diagram fails lightweight validation, retry that diagram once with a repair prompt.
     """
     dtypes  = [dt for dt, _ in diagram_types]
     prompts = []
@@ -546,14 +651,38 @@ def pass3_generate_all(
     raw_outputs = vllm_generate_batch(llm, prompts, max_tokens=max_tokens)
 
     results: Dict[str, str] = {}
+    raw_by_type: Dict[str, str] = {}
     for dtype, raw in zip(dtypes, raw_outputs):
-        m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
-        if m:
-            results[dtype] = m.group(0).strip()
-        elif raw.strip():
-            results[dtype] = f"@startuml\n{raw.strip()}\n@enduml"
-        else:
-            results[dtype] = ""
+        raw_by_type[dtype] = raw
+        results[dtype] = extract_start_end_block(raw)
+
+    # One retry per failing diagram type (only for the known failure patterns)
+    retry_types: List[str] = []
+    retry_prompts: List[str] = []
+
+    for dtype in dtypes:
+        puml = results.get(dtype, "")
+        errs = validate_puml(dtype, puml)
+        if errs:
+            retry_types.append(dtype)
+            user_msg = REPAIR_TMPL.format(
+                dtype_upper=dtype.upper(),
+                errors="\n".join(f"- {e}" for e in errs[:25]),
+                previous=puml,
+            )
+            retry_prompts.append(format_prompt(tokenizer, GENERATION_SYSTEM, user_msg))
+
+    if retry_prompts:
+        print(f"      Retrying {len(retry_prompts)} diagram(s) after validation failures...")
+        retry_raw = vllm_generate_batch(llm, retry_prompts, max_tokens=max_tokens)
+        for dtype, raw in zip(retry_types, retry_raw):
+            repaired = extract_start_end_block(raw)
+            # If repair still fails, keep repaired anyway (often closer), but warn.
+            errs = validate_puml(dtype, repaired)
+            if errs:
+                print(f"      [WARN] {dtype} still fails validation after retry (showing first issue): {errs[0]}")
+            results[dtype] = repaired
+
     return results
 
 
