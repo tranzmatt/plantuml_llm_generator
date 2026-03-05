@@ -1,4 +1,25 @@
-faiss-cpu
-numpy
-sentence-transformers
-requests
+# Core LLM inference
+vllm>=0.5.0
+transformers>=4.41.0
+accelerate>=0.30.0
+torch>=2.2.0
+
+# Tokenization / prompt handling
+tokenizers>=0.15.0
+sentencepiece>=0.1.99
+
+# Embeddings for RAG retrieval
+sentence-transformers>=2.7.0
+
+# Vector search
+faiss-cpu>=1.7.4
+
+# Data handling
+numpy>=1.26.0
+pandas>=2.2.0
+tqdm>=4.66.0
+
+# CLI + utilities
+pyyaml>=6.0
+python-dotenv>=1.0.0
+requests>=2.31.0
