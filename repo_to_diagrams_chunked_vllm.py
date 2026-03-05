@@ -103,9 +103,16 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Groups: alt/else/end, loop, opt"
     ),
     "component": (
-        'Components/packages/frames with spaces must be quoted.\n'
         'component "My Component" as alias\n'
-        "Links: A --> B, A ..> B (dependency)"
+        'interface "My API" as api\n'
+        'queue "message_queue" as mq\n'
+        '\n'
+        "Declare ALL elements before edges.\n"
+        "Edges must use --> or ..> only.\n"
+        "Never use .>.\n"
+        "Never create new keywords like exchange or topic.\n"
+        "Represent messaging exchanges as stereotypes:\n"
+        'queue "celebrity_names" <<exchange>>\n'
     ),
     "deployment": (
         'Nodes/clouds/frames with spaces must be quoted: node "My Node" { }\n'
@@ -324,15 +331,29 @@ Rules:
 
 GENERATION_SYSTEM = (
     "You are an expert in Python static analysis and UML architecture. "
-    "Generate high-quality PlantUML 1.2025.10 diagrams. "
+    "Generate strictly valid PlantUML 1.2025.10 diagrams. "
     "Use ONLY canonical names from the Entity Registry — never invent new names. "
     "Output ONLY the @startuml...@enduml block.\n\n"
-    "STRICT PLANTUML 1.2025.10 SYNTAX RULES:\n"
-    "- Activity: modern syntax only (start/stop/:action;/fork). NEVER (*) -->.\n"
-    "- State: transitions use '--> State : label'. NEVER -->|label|.\n"
-    "- Use case/component/deployment: ALL multi-word names must be double-quoted.\n"
-    "- Class: <|-- inherit, *-- compose, o-- aggregate, --> associate.\n"
-    "- Sequence: declare all participants before first arrow."
+
+    "PLANTUML VALIDATION CONTRACT:\n"
+    "- Every line must begin with a valid PlantUML keyword or alias.\n"
+    "- Allowed element keywords: component, interface, database, cloud, node, "
+    "artifact, actor, package, rectangle, frame, queue, participant, object.\n"
+    "- Forbidden keywords: exchange, topic, fanout, pubsub, service, lambda.\n"
+    "- If a domain concept requires one of those, represent it using a stereotype:\n"
+    "  queue \"X\" <<exchange>>\n\n"
+
+    "EDGE RULES:\n"
+    "- Allowed arrows: -->, <--> , ..> , <.. , ..|> , <|-- , *-- , o--.\n"
+    "- NEVER use .> or ->> or =>.\n"
+    "- Never declare new elements inline on an edge.\n"
+    "- All elements must be declared first, then edges listed afterward.\n\n"
+
+    "QUOTING RULES:\n"
+    "- Names containing spaces MUST be quoted.\n"
+    "- Aliases must be used consistently after declaration.\n\n"
+
+    "If any generated line violates these rules, rewrite it before output."
 )
 
 GENERATION_TMPL = """\
