@@ -97,19 +97,24 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Composition: ClassA *-- ClassB\n"
         "Aggregation: ClassA o-- ClassB\n"
         "Association: ClassA --> ClassB\n"
-        "Members: + public, - private, # protected"
+        "Members: + public, - private, # protected\n"
+        "Hard constraints:\n"
+        "- Do not mix other diagram element families here (no component/queue/node/participant/object).\n"
+        "- If mixing is unavoidable, add `allowmixing`, but prefer separate diagrams."
     ),
     "sequence": (
         "Declare all participants at the top before any arrows.\n"
         'participant "Name" as alias\n'
-        "Sync call: A -> B : message   (NEVER use ->>)\n"
+        "Sync call: A -> B : message\n"
         "Return:    B --> A : response\n"
         "activate B / deactivate B\n"
         "Groups: alt/else/end, loop, opt\n"
-        "\n"
-        "External systems/APIs MUST be declared as participants too (do not reference undeclared names)."
+        "Hard constraints:\n"
+        "- Every participant referenced in a message must be declared before messages.\n"
+        "- If a participant name contains spaces, quote it and/or use an alias; message endpoints should be aliases."
     ),
     "component": (
+        'Components/packages/frames with spaces must be quoted.\n'
         'component "My Component" as alias\n'
         'interface "My API" as api\n'
         'queue "message_queue" as mq\n'
@@ -120,6 +125,11 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Never create new keywords like exchange or topic.\n"
         "Represent messaging exchanges as stereotypes:\n"
         'queue "celebrity_names" <<exchange>>\n'
+        "Links: A --> B, A ..> B (dependency)\n"
+        "Hard constraints (avoid common syntax traps):\n"
+        "- Do NOT define/alias an element inline inside a link line. (INVALID: `A --> \"Thing\" as T`). Declare first, then connect.\n"
+        "- One edge per line. Do NOT use comma-separated targets. (INVALID: `A --> B, C`).\n"
+        "- Do not mix other diagram element families (e.g., class/object/participant) in a component diagram."
         "\n"
         "Do NOT declare elements inline on edges (e.g. A --> interface \"X\" as x). Declare first, then connect."
     ),
@@ -129,17 +139,83 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         'frame "VPC" { }\n'
         "Artifacts: artifact \"app.jar\"\n"
         "Links: A --> B : label\n"
-        "\n"
-        "Do NOT use the keyword 'exchange'. If you need it, declare a queue with stereotype:\n"
-        'queue "celebrity_names" <<exchange>>\n'
-        "Do NOT declare elements inline on edges; declare first, then connect."
+        "Hard constraints:\n"
+        "- There is no `exchange` keyword. If you need to model a RabbitMQ exchange/topic, represent it as an `artifact` or `component`\n"
+        "  with a descriptive label (e.g., `artifact \"exchange: celebrity_names\" as EX`).\n"
+        "- Do NOT define/alias an element inline inside a link line. Declare first, then connect.\n"
+        "- One edge per line. Do NOT use comma-separated targets."
     ),
     "object": (
+        "Object diagrams should only use `object` declarations and links between objects.\n"
+        'object "name:Type" as o1\n'
+        "Links: o1 -- o2\n"
+        "Hard constraints:\n"
+        "- Do not include queue/component/class/node/participant elements.\n"
+        "- If mixing is unavoidable, add `allowmixing`, but prefer separate diagrams."
         'Object instances: object "instanceName : ClassName" as alias\n'
         "Field values: alias : field = value\n"
         "Links same as class diagram."
     ),
 }
+
+
+def lint_plantuml(diagram_type: str, puml: str) -> List[str]:
+    """Heuristic lint rules to prevent common PlantUML syntax errors."""
+
+    issues: List[str] = []
+    if not puml:
+        return issues
+
+    lines = [ln.rstrip() for ln in puml.splitlines()]
+
+    # Mixing diagram element families (often triggers "use allowmixing").
+    if diagram_type == "class":
+        banned_prefixes = ("component ", "queue ", "node ", "participant ", "actor ", "object ")
+        if any(ln.lstrip().startswith(banned_prefixes) for ln in lines):
+            issues.append("Class diagram contains non-class elements (component/queue/node/participant/object). Keep to class syntax only.")
+
+    if diagram_type == "object":
+        banned_prefixes = ("class ", "component ", "queue ", "node ", "participant ", "actor ")
+        if any(ln.lstrip().startswith(banned_prefixes) for ln in lines):
+            issues.append("Object diagram contains non-object elements (class/component/queue/node/participant). Keep to object syntax only.")
+
+    # Inline alias/definition inside an edge (e.g., `A --> "X" as X`).
+    arrow_pat = re.compile(r"(--?>|\.\.|-\?>|<--|<\.\.)")
+    for ln in lines:
+        s = ln.strip()
+        if not s or s.startswith("'"):
+            continue
+        if arrow_pat.search(s) and re.search(r"\bas\s+\w+\b", s) and not s.startswith((
+            "participant ", "actor ", "component ", "artifact ", "node ", "class ", "object ",
+        )):
+            issues.append("Edge line defines/aliases an element inline (contains `as ...`). Declare it on its own line, then connect.")
+            break
+
+    # Comma-separated targets in an edge (PlantUML expects one edge per line).
+    for ln in lines:
+        s = ln.strip()
+        if arrow_pat.search(s) and "," in s:
+            issues.append("Edge line targets multiple nodes with commas. Use one edge per line.")
+            break
+
+    # Sequence: message references to names with spaces should be quoted/aliased.
+    if diagram_type == "sequence":
+        for ln in lines:
+            s = ln.strip()
+            if re.search(r"-+>>", s) or re.search(r"-+>", s):
+                m = re.search(r"-+>>?\s*([^:]+?)\s*:", s)
+                if m:
+                    rhs = m.group(1).strip()
+                    if " " in rhs and not (rhs.startswith('"') and rhs.endswith('"')):
+                        issues.append("Sequence message targets a name with spaces but without quotes/alias. Declare participants and use aliases.")
+                        break
+
+    # Deployment: `exchange` isn't a PlantUML keyword.
+    if diagram_type == "deployment":
+        if any(re.match(r"\s*exchange\b", ln) for ln in lines):
+            issues.append("Deployment diagram uses `exchange` keyword. Model exchanges as `artifact` or `component` instead.")
+
+    return issues
 
 # ===========================================================================
 # vLLM helpers — model loaded ONCE, reused everywhere
@@ -348,7 +424,12 @@ GENERATION_SYSTEM = (
     "Generate strictly valid PlantUML 1.2025.10 diagrams. "
     "Use ONLY canonical names from the Entity Registry — never invent new names. "
     "Output ONLY the @startuml...@enduml block.\n\n"
-
+    "STRICT PLANTUML 1.2025.10 SYNTAX RULES:\n"
+    "- Activity: modern syntax only (start/stop/:action;/fork). NEVER (*) -->.\n"
+    "- State: transitions use '--> State : label'. NEVER -->|label|.\n"
+    "- Use case/component/deployment: ALL multi-word names must be double-quoted.\n"
+    "- Class: <|-- inherit, *-- compose, o-- aggregate, --> associate.\n"
+    "- Sequence: declare all participants before first arrow."
     "PLANTUML VALIDATION CONTRACT:\n"
     "- Never output PlantUML error text.\n"
     "- Never reference undeclared elements/aliases.\n"
@@ -634,7 +715,8 @@ def pass3_generate_all(
     If a diagram fails lightweight validation, retry that diagram once with a repair prompt.
     """
     dtypes  = [dt for dt, _ in diagram_types]
-    prompts = []
+    prompts: List[str] = []
+    user_msgs: Dict[str, str] = {}
     for dtype, desc in diagram_types:
         user_msg = GENERATION_TMPL.format(
             dtype_upper=dtype.upper(),
