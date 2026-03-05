@@ -1,3 +1,4 @@
+uml_out/
 venv/
 .idea/
 rag/*.json
