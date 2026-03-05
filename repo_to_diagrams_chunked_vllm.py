@@ -93,14 +93,27 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "- Do NOT use: component, participant, node, queue, cloud, artifact, rectangle, frame, actor, object.\n"
         "- Do NOT use allowmixing.\n"
         "\n"
-        "Inheritance: Child <|-- Parent\n"
-        "Composition: ClassA *-- ClassB\n"
-        "Aggregation: ClassA o-- ClassB\n"
-        "Association: ClassA --> ClassB\n"
+        "CRITICAL — class body declarations and relationship arrows MUST be on SEPARATE lines:\n"
+        "  WRONG:  class LocalFileWriter <|-- FileWriter {\n"
+        "  WRONG:  class A --|> IFoo\n"
+        "  CORRECT:\n"
+        "    class LocalFileWriter {\n"
+        "    }\n"
+        "    LocalFileWriter <|-- FileWriter\n"
+        "\n"
+        "NEVER use 'extends', 'implements', or 'inherits' keywords — use PlantUML arrows:\n"
+        "  WRONG:  class Foo extends Bar\n"
+        "  CORRECT: Foo <|-- Bar\n"
+        "\n"
+        "Inheritance:  Child <|-- Parent\n"
+        "Realisation:  Class ..|> Interface\n"
+        "Composition:  ClassA *-- ClassB\n"
+        "Aggregation:  ClassA o-- ClassB\n"
+        "Association:  ClassA --> ClassB\n"
         "Members: + public, - private, # protected\n"
         "Hard constraints:\n"
         "- Do not mix other diagram element families here (no component/queue/node/participant/object).\n"
-        "- If mixing is unavoidable, add `allowmixing`, but prefer separate diagrams."
+        "- Relationship arrows go on their OWN lines, never on a class declaration line."
     ),
     "sequence": (
         "Declare all participants at the top before any arrows.\n"
@@ -173,6 +186,38 @@ def lint_plantuml(diagram_type: str, puml: str) -> List[str]:
         banned_prefixes = ("component ", "queue ", "node ", "participant ", "actor ", "object ")
         if any(ln.lstrip().startswith(banned_prefixes) for ln in lines):
             issues.append("Class diagram contains non-class elements (component/queue/node/participant/object). Keep to class syntax only.")
+
+        # Detect class/interface/abstract declarations that incorrectly embed a
+        # relationship arrow on the same line, e.g.:
+        #   class Foo <|-- Bar {        ← INVALID
+        #   abstract class A --|> B     ← INVALID
+        # PlantUML requires: class body declaration and relationship arrows on
+        # separate lines.
+        _cls_decl_arrow_re = re.compile(
+            r"^\s*(abstract\s+class|class|interface|enum)\s+\S.*"
+            r"(<\|--|--\|>|\*--|--\*|o--|--o|<--|-+>|\.\.>|<\.\.)",
+            re.IGNORECASE,
+        )
+        for ln in lines:
+            if _cls_decl_arrow_re.match(ln):
+                issues.append(
+                    "Class declaration line contains a relationship arrow — PlantUML does NOT "
+                    "allow combining 'class Foo <|-- Bar {' on one line. "
+                    "Declare the class body separately, then add the arrow on its own line: "
+                    "'class Foo { }\\nFoo <|-- Bar'"
+                )
+                break
+
+        # Detect Java/Python-style inheritance keywords that are not valid PlantUML.
+        _java_inherit_re = re.compile(
+            r"^\s*(class|abstract\s+class|interface)\s+\S+\s+(extends|implements|inherits)\s+",
+            re.IGNORECASE,
+        )
+        if any(_java_inherit_re.match(ln) for ln in lines):
+            issues.append(
+                "Class diagram uses Java/Python-style 'extends'/'implements' keywords. "
+                "Use PlantUML arrows instead: Child <|-- Parent  or  Class ..|> Interface"
+            )
 
     if diagram_type == "object":
         banned_prefixes = ("class ", "component ", "queue ", "node ", "participant ", "actor ")
@@ -538,6 +583,85 @@ _CLASS_MIXED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Detect a class/interface/abstract declaration that also contains a relationship arrow —
+# PlantUML does not permit combining body declaration and arrows on the same line.
+# Example of INVALID syntax caught here:
+#   class LocalFileWriter <|-- FileWriter {
+#   abstract class A --|> Iface
+_CLASS_DECL_ARROW_RE = re.compile(
+    r"^\s*(abstract\s+class|class|interface|enum)\s+\S.*"
+    r"(<\|--|--\|>|\*--|--\*|o--|--o|<\.\.|\.\.|>|<--|-+>)",
+    re.IGNORECASE,
+)
+
+# Detect Java/Python-style inheritance keywords that are not valid PlantUML.
+_JAVA_INHERIT_RE = re.compile(
+    r"^\s*(abstract\s+class|class|interface)\s+\S+\s+(extends|implements|inherits)\s+",
+    re.IGNORECASE,
+)
+
+def repair_class_diagram_lines(puml: str) -> str:
+    """
+    Post-process a class diagram to split lines that combine a class body
+    declaration with a relationship arrow — a common LLM mistake that causes
+    PlantUML syntax errors.
+
+    Examples repaired:
+      BEFORE: class LocalFileWriter <|-- FileWriter {
+      AFTER:  class LocalFileWriter {
+              }
+              LocalFileWriter <|-- FileWriter
+
+      BEFORE: abstract class A --|> IFoo
+      AFTER:  abstract class A {
+              }
+              A --|> IFoo
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Matches: (class-kw) (ClassName) (optional-stereotype) (arrow) (OtherName) (optional-{)
+    _split_re = re.compile(
+        r"^(\s*)(abstract\s+class|class|interface|enum)"   # group 1=indent, 2=kw
+        r"\s+(\w+)"                                        # group 3=ClassName
+        r"(\s+<<[^>]+>>)?"                                 # group 4=optional stereotype
+        r"\s*(<\|--|--\|>|\*--|--\*|o--|--o|<\.\.|\.\.|>|<--|-+>)"  # group 5=arrow
+        r"\s*(\w+)"                                        # group 6=OtherName
+        r"\s*(\{?).*$",                                    # group 7=optional {
+        re.IGNORECASE,
+    )
+
+    out_lines: List[str] = []
+    deferred_arrows: List[str] = []
+    skip_next_close_brace = False  # consume orphaned } after a split combined line
+
+    for ln in puml.splitlines():
+        # If the previous iteration split a "class Foo <|-- Bar {" line, the LLM's
+        # matching closing "}" is now orphaned — skip exactly one such line.
+        if skip_next_close_brace and ln.strip() == "}":
+            skip_next_close_brace = False
+            continue
+
+        m = _split_re.match(ln)
+        if m:
+            indent, kw, cls_name, stereo, arrow, other_name, brace = m.groups()
+            stereo = stereo or ""
+            out_lines.append(f"{indent}{kw} {cls_name}{stereo} {{")
+            out_lines.append(f"{indent}}}")
+            skip_next_close_brace = bool(brace)
+            deferred_arrows.append(f"{indent}{cls_name} {arrow} {other_name}")
+        else:
+            if ln.strip() == "@enduml" and deferred_arrows:
+                out_lines.extend(deferred_arrows)
+                deferred_arrows.clear()
+            out_lines.append(ln)
+
+    if deferred_arrows:
+        out_lines.extend(deferred_arrows)
+
+    return "\n".join(out_lines)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -587,6 +711,18 @@ def validate_puml(diagram_type: str, puml: str) -> List[str]:
 
         if diagram_type == "class" and _CLASS_MIXED_RE.search(line):
             errors.append(f"line {i}: mixed non-class element in class diagram: {line.strip()}")
+
+        if diagram_type == "class" and _CLASS_DECL_ARROW_RE.match(line):
+            errors.append(
+                f"line {i}: class declaration combined with relationship arrow "
+                f"(not valid in PlantUML): {line.strip()}"
+            )
+
+        if diagram_type == "class" and _JAVA_INHERIT_RE.match(line):
+            errors.append(
+                f"line {i}: Java/Python-style inheritance keyword ('extends'/'implements') — "
+                f"use PlantUML arrows instead: {line.strip()}"
+            )
 
         if diagram_type == "sequence":
             # sequence must use -> not ->> (already caught), also discourage missing participant declarations,
@@ -751,7 +887,11 @@ def pass3_generate_all(
     raw_by_type: Dict[str, str] = {}
     for dtype, raw in zip(dtypes, raw_outputs):
         raw_by_type[dtype] = raw
-        results[dtype] = extract_start_end_block(raw)
+        puml = extract_start_end_block(raw)
+        # Auto-repair common class diagram structural mistakes before validation
+        if dtype == "class":
+            puml = repair_class_diagram_lines(puml)
+        results[dtype] = puml
 
     # One retry per failing diagram type (only for the known failure patterns)
     retry_types: List[str] = []
@@ -774,6 +914,8 @@ def pass3_generate_all(
         retry_raw = vllm_generate_batch(llm, retry_prompts, max_tokens=max_tokens)
         for dtype, raw in zip(retry_types, retry_raw):
             repaired = extract_start_end_block(raw)
+            if dtype == "class":
+                repaired = repair_class_diagram_lines(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
             errs = validate_puml(dtype, repaired)
             if errs:
