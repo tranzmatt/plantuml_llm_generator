@@ -546,6 +546,21 @@ def extract_start_end_block(raw: str) -> str:
         return f"@startuml\n{raw.strip()}\n@enduml"
     return ""
 
+def normalize_startuml_name(puml: str, uml_name: str) -> str:
+    """
+    Ensure the first @startuml line uses a deterministic name that matches the output file stem.
+    This prevents PlantUML from generating images with mismatched names and clobbering outputs.
+    """
+    if not puml:
+        return puml
+    lines = puml.splitlines()
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("@startuml"):
+            lines[i] = f"@startuml {uml_name}"
+            break
+    return "\n".join(lines)
+
 def validate_puml(diagram_type: str, puml: str) -> List[str]:
     errors: List[str] = []
     if not puml.strip():
@@ -909,7 +924,9 @@ def main() -> None:
         puml = diagrams.get(dtype, "").strip()
         if not puml:
             print(f"    ✗ {dtype} — empty output, skipped"); continue
-        out_path = os.path.join(output_dir, f"{repo_name}_{dtype}.puml")
+        uml_name = f"{repo_name}_{dtype}"
+        puml = normalize_startuml_name(puml, uml_name).strip()
+        out_path = os.path.join(output_dir, f"{uml_name}.puml")
         open(out_path, "w").write(puml)
         print(f"    ✓ {out_path}  ({len(puml):,} chars)")
         written += 1
