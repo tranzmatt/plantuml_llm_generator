@@ -793,6 +793,85 @@ def repair_duplicate_aliases(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_unquoted_multiword_edges(puml: str) -> str:
+    """
+    Fix edge lines where a multi-word element name is used bare (without quotes
+    or an alias), which causes a PlantUML syntax error.
+
+    Example of the bug:
+        node "Local Machine" {        ← declared with quotes, no alias
+            ...
+        }
+        Local Machine --> MQTT        ← ERROR: unquoted multi-word source
+
+    Two-pass strategy
+    -----------------
+    Pass 1: Collect every element name that was declared with quotes but has NO
+            `as <alias>` clause.  Also collect every declared alias so we know
+            what short names already exist.
+
+    Pass 2: On edge lines (lines containing -->, <--, <-->, ..>, <..) scan the
+            LHS and RHS tokens.  If a contiguous run of bare words (no quotes,
+            not an alias) matches a known multi-word name, wrap it in quotes.
+            This makes `Local Machine --> MQTT` become `"Local Machine" --> MQTT`.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Matches any quoted-name declaration, optionally with `as alias`
+    # Captures: (quoted_name, alias_or_empty)
+    _DECL_RE = re.compile(
+        r'^\s*(?:node|component|artifact|database|cloud|queue|rectangle|frame'
+        r'|package|actor|participant|object|class|interface|usecase|state'
+        r'|boundary|control|entity|storage|agent|card|collections)\s+'
+        r'"([^"]+)"'                  # group 1: the quoted display name
+        r'(?:\s+as\s+(\w+))?',       # group 2: optional alias
+        re.IGNORECASE,
+    )
+
+    # Arrow pattern for edge lines
+    _EDGE_RE = re.compile(
+        r'(-->|<--|<-->|\.{2}>|<\.{2}|\*--|o--|<\|--|--\|>|-+>)',
+        re.IGNORECASE,
+    )
+
+    lines = puml.splitlines()
+
+    # Pass 1: build set of multi-word names that have NO alias
+    unaliased_multiword: set = set()
+    all_aliases: set = set()
+    for ln in lines:
+        m = _DECL_RE.match(ln)
+        if m:
+            name, alias = m.group(1), m.group(2)
+            if alias:
+                all_aliases.add(alias)
+            elif " " in name:
+                unaliased_multiword.add(name)
+
+    if not unaliased_multiword:
+        return puml  # nothing to fix
+
+    # Sort longest-first so "Local Machine Alpha" is tried before "Local Machine"
+    candidates = sorted(unaliased_multiword, key=len, reverse=True)
+
+    out: List[str] = []
+    for ln in lines:
+        if _EDGE_RE.search(ln) and not ln.strip().startswith("'"):
+            original = ln
+            for name in candidates:
+                # Only replace bare (unquoted) occurrences
+                # Use a word-boundary-aware pattern that won't touch already-quoted names
+                pat = r'(?<!")\b' + re.escape(name) + r'\b(?!")'
+                if re.search(pat, ln):
+                    ln = re.sub(pat, f'"{name}"', ln)
+            if ln != original:
+                print(f"      [REPAIR] Quoted multi-word name on edge: {original.strip()!r} → {ln.strip()!r}")
+        out.append(ln)
+
+    return "\n".join(out)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -1048,6 +1127,7 @@ def pass3_generate_all(
         puml = extract_start_end_block(raw)
         # Auto-repair common structural mistakes before validation
         puml = repair_duplicate_aliases(puml)
+        puml = repair_unquoted_multiword_edges(puml)
         if dtype == "class":
             puml = repair_class_diagram_lines(puml)
         results[dtype] = puml
@@ -1074,6 +1154,7 @@ def pass3_generate_all(
         for dtype, raw in zip(retry_types, retry_raw):
             repaired = extract_start_end_block(raw)
             repaired = repair_duplicate_aliases(repaired)
+            repaired = repair_unquoted_multiword_edges(repaired)
             if dtype == "class":
                 repaired = repair_class_diagram_lines(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
