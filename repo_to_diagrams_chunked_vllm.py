@@ -330,16 +330,17 @@ def _count_tokens(tokenizer, text: str) -> int:
 
 def _compress_extractions(extractions: List[Dict], level: int) -> List[Dict]:
     """
-    Return a progressively slimmer copy of the extractions list.
+    Return a progressively slimmer copy of the extractions list so that the
+    Pass 2 registry prompt fits within the model's context window.
 
     level 0 — original (full fidelity)
-    level 1 — drop per-class 'attributes' (rarely needed by registry)
+    level 1 — drop per-class 'attributes'
     level 2 — also drop 'imports' per file
     level 3 — also truncate 'methods' to first 5 per class
     level 4 — also drop per-class 'relationships'
     level 5 — also drop per-file 'relationships'
     level 6 — keep only file, classes (name+bases only), functions[:10], summary
-    level 7 — keep only file, class names, summary  (minimum viable)
+    level 7 — keep only file, class names (strings), summary  (minimum viable)
     """
     import copy
     result = []
@@ -735,6 +736,63 @@ def repair_class_diagram_lines(puml: str) -> str:
     return "\n".join(out_lines)
 
 
+def repair_duplicate_aliases(puml: str) -> str:
+    """
+    Detect and fix duplicate `as <alias>` declarations in any PlantUML diagram.
+
+    The LLM commonly produces collisions when multiple element names share the
+    same initials (e.g. MqttPublisher → mp, MessageProcessor → mp).
+
+    Strategy
+    --------
+    1. Parse every declaration line that ends with `as <alias>`.
+    2. On the first occurrence of an alias, keep it unchanged.
+    3. On every subsequent collision, generate a new unique alias by appending
+       an incrementing numeric suffix (mp2, mp3, …) and rewrite ALL references
+       to the old alias in the remainder of the diagram.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    _AS_RE = re.compile(
+        r"^(\s*(?:object|class|abstract\s+class|interface|enum|participant|actor"
+        r"|component|node|database|cloud|queue|artifact|rectangle|frame|package"
+        r"|usecase|state|boundary|control|entity|collections|(?:create\s+)?[\w]+)"
+        r"\s+.+?\bas\s+)(\w+)(\s*(?:#\S+)?\s*)$",
+        re.IGNORECASE,
+    )
+
+    lines = puml.splitlines()
+    seen: Dict[str, int] = {}       # alias → count of times seen so far
+    renames: Dict[str, str] = {}    # old_alias → new_alias for in-flight rewrites
+
+    out: List[str] = []
+    for ln in lines:
+        m = _AS_RE.match(ln)
+        if m:
+            prefix, alias, suffix = m.group(1), m.group(2), m.group(3)
+            if alias not in seen:
+                seen[alias] = 1
+                out.append(ln)
+            else:
+                seen[alias] += 1
+                new_alias = f"{alias}{seen[alias]}"
+                while new_alias in seen:
+                    seen[alias] += 1
+                    new_alias = f"{alias}{seen[alias]}"
+                seen[new_alias] = 1
+                renames[alias] = new_alias
+                out.append(f"{prefix}{new_alias}{suffix}")
+                print(f"      [REPAIR] Duplicate alias '{alias}' → renamed to '{new_alias}'")
+        else:
+            if renames:
+                for old, new in renames.items():
+                    ln = re.sub(rf"\b{re.escape(old)}\b", new, ln)
+            out.append(ln)
+
+    return "\n".join(out)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -988,7 +1046,8 @@ def pass3_generate_all(
     for dtype, raw in zip(dtypes, raw_outputs):
         raw_by_type[dtype] = raw
         puml = extract_start_end_block(raw)
-        # Auto-repair common class diagram structural mistakes before validation
+        # Auto-repair common structural mistakes before validation
+        puml = repair_duplicate_aliases(puml)
         if dtype == "class":
             puml = repair_class_diagram_lines(puml)
         results[dtype] = puml
@@ -1014,6 +1073,7 @@ def pass3_generate_all(
         retry_raw = vllm_generate_batch(llm, retry_prompts, max_tokens=max_tokens)
         for dtype, raw in zip(retry_types, retry_raw):
             repaired = extract_start_end_block(raw)
+            repaired = repair_duplicate_aliases(repaired)
             if dtype == "class":
                 repaired = repair_class_diagram_lines(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
