@@ -294,16 +294,89 @@ def format_prompt(tokenizer, system_msg: str, user_msg: str) -> str:
     Format a chat prompt using the model's own chat template if available,
     falling back to a plain System/User/Assistant format.
     """
+    import warnings
     try:
         messages = [
             {"role": "system",    "content": system_msg},
             {"role": "user",      "content": user_msg},
         ]
-        return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        # tokenize=False is intentional — we need a string, not token ids.
+        # Wrap in catch_warnings to suppress the MistralCommonTokenizer advisory.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
     except Exception:
         return f"System: {system_msg}\n\nUser: {user_msg}\n\nAssistant:"
+
+
+def _count_tokens(tokenizer, text: str) -> int:
+    """Return the token count for *text* using whatever interface the tokenizer exposes."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return len(tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            pass
+        try:
+            return len(tokenizer(text)["input_ids"])
+        except Exception:
+            pass
+    # Last-resort estimate: ~3.5 chars / token (conservative for code)
+    return max(1, int(len(text) / 3.5))
+
+
+def _compress_extractions(extractions: List[Dict], level: int) -> List[Dict]:
+    """
+    Return a progressively slimmer copy of the extractions list.
+
+    level 0 — original (full fidelity)
+    level 1 — drop per-class 'attributes' (rarely needed by registry)
+    level 2 — also drop 'imports' per file
+    level 3 — also truncate 'methods' to first 5 per class
+    level 4 — also drop per-class 'relationships'
+    level 5 — also drop per-file 'relationships'
+    level 6 — keep only file, classes (name+bases only), functions[:10], summary
+    level 7 — keep only file, class names, summary  (minimum viable)
+    """
+    import copy
+    result = []
+    for ex in extractions:
+        e = copy.deepcopy(ex)
+        if level >= 1:
+            for cls in e.get("classes", []):
+                cls.pop("attributes", None)
+        if level >= 2:
+            e.pop("imports", None)
+        if level >= 3:
+            for cls in e.get("classes", []):
+                cls["methods"] = cls.get("methods", [])[:5]
+        if level >= 4:
+            for cls in e.get("classes", []):
+                cls.pop("relationships", None)
+        if level >= 5:
+            e.pop("relationships", None)
+        if level >= 6:
+            slim_classes = [
+                {"name": c.get("name", ""), "bases": c.get("bases", [])}
+                for c in e.get("classes", [])
+            ]
+            e = {
+                "file":      e.get("file", ""),
+                "classes":   slim_classes,
+                "functions": e.get("functions", [])[:10],
+                "summary":   e.get("summary", ""),
+            }
+        if level >= 7:
+            e = {
+                "file":    e.get("file", ""),
+                "classes": [c.get("name", "") for c in e.get("classes", [])],
+                "summary": e.get("summary", ""),
+            }
+        result.append(e)
+    return result
 
 
 def vllm_generate_batch(
@@ -780,14 +853,41 @@ def pass2_build_registry(
     llm: LLM,
     tokenizer,
     max_tokens: int,
+    max_model_len: int = 32768,
 ) -> Dict:
-    user_msg = REGISTRY_TMPL.format(
-        repo_name=repo_name,
-        summaries_json=json.dumps(extractions, indent=2),
-    )
-    print(f"      Registry prompt: {len(user_msg):,} chars")
-    prompt = format_prompt(tokenizer, REGISTRY_SYSTEM, user_msg)
-    raw = vllm_generate_one(llm, prompt, max_tokens=max_tokens)
+    input_budget = max_model_len - max_tokens  # tokens available for the prompt
+
+    # Try progressively slimmer representations of the extractions until the
+    # formatted prompt fits within the model's input token budget.
+    MAX_COMPRESS_LEVEL = 7
+    chosen_prompt = None
+    for level in range(MAX_COMPRESS_LEVEL + 1):
+        slim = _compress_extractions(extractions, level)
+        user_msg = REGISTRY_TMPL.format(
+            repo_name=repo_name,
+            summaries_json=json.dumps(slim, indent=2),
+        )
+        prompt = format_prompt(tokenizer, REGISTRY_SYSTEM, user_msg)
+        n_tokens = _count_tokens(tokenizer, prompt)
+        if level == 0:
+            print(f"      Registry prompt: {len(user_msg):,} chars  ({n_tokens:,} tokens)")
+        if n_tokens <= input_budget:
+            if level > 0:
+                print(f"      [INFO] Compressed extractions to level {level} "
+                      f"({n_tokens:,} tokens ≤ budget {input_budget:,})")
+            chosen_prompt = prompt
+            break
+        else:
+            print(f"      [WARN] Level {level}: {n_tokens:,} tokens > budget {input_budget:,} "
+                  f"— compressing further…")
+
+    if chosen_prompt is None:
+        # Absolute last resort: send level-7 anyway and let vLLM hard-truncate
+        print("      [ERROR] Could not fit registry prompt even at maximum compression. "
+              "Sending anyway — expect a vLLM truncation error or degraded output.")
+        chosen_prompt = prompt  # last attempted prompt from the loop
+
+    raw = vllm_generate_one(llm, chosen_prompt, max_tokens=max_tokens)
     registry = _parse_json(raw)
     if registry:
         return registry
@@ -1034,7 +1134,7 @@ def main() -> None:
 
         # Pass 2 — registry normalization
         print(f"\n[6] Pass 2 — normalizing {len(extractions)} extractions → Entity Registry...")
-        registry = pass2_build_registry(extractions, repo_name, llm, tokenizer, args.registry_tokens)
+        registry = pass2_build_registry(extractions, repo_name, llm, tokenizer, args.registry_tokens, args.max_model_len)
         print(f"    {len(registry.get('classes',[]))} classes  "
               f"{len(registry.get('modules',[]))} modules  "
               f"{len(registry.get('components',[]))} components")
