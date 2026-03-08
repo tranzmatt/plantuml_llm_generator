@@ -43,6 +43,9 @@ import requests
 from sentence_transformers import SentenceTransformer
 from vllm import LLM, SamplingParams
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="mistral_common")
+
 # ---------------------------------------------------------------------------
 # Diagram catalogue
 # ---------------------------------------------------------------------------
@@ -62,6 +65,11 @@ ENTRY_POINT_DIAGRAMS = {"sequence", "activity", "state", "usecase"}
 
 MAX_CHARS_PER_FILE       = 6_000
 GENERATION_CHUNK_BUDGET  = 24_000
+# Extra token headroom subtracted from every input budget check.
+# _count_tokens() can disagree with vLLM's internal tokenizer by a few tokens
+# (different BOS/EOS handling, special tokens, etc.).  A margin of 64 ensures
+# our pre-check is always stricter than vLLM's hard limit.
+CONTEXT_SAFETY_MARGIN    = 64
 
 # ---------------------------------------------------------------------------
 # Per-diagram syntax rules injected into every generation prompt
@@ -93,14 +101,27 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "- Do NOT use: component, participant, node, queue, cloud, artifact, rectangle, frame, actor, object.\n"
         "- Do NOT use allowmixing.\n"
         "\n"
-        "Inheritance: Child <|-- Parent\n"
-        "Composition: ClassA *-- ClassB\n"
-        "Aggregation: ClassA o-- ClassB\n"
-        "Association: ClassA --> ClassB\n"
+        "CRITICAL — class body declarations and relationship arrows MUST be on SEPARATE lines:\n"
+        "  WRONG:  class LocalFileWriter <|-- FileWriter {\n"
+        "  WRONG:  class A --|> IFoo\n"
+        "  CORRECT:\n"
+        "    class LocalFileWriter {\n"
+        "    }\n"
+        "    LocalFileWriter <|-- FileWriter\n"
+        "\n"
+        "NEVER use 'extends', 'implements', or 'inherits' keywords — use PlantUML arrows:\n"
+        "  WRONG:  class Foo extends Bar\n"
+        "  CORRECT: Foo <|-- Bar\n"
+        "\n"
+        "Inheritance:  Child <|-- Parent\n"
+        "Realisation:  Class ..|> Interface\n"
+        "Composition:  ClassA *-- ClassB\n"
+        "Aggregation:  ClassA o-- ClassB\n"
+        "Association:  ClassA --> ClassB\n"
         "Members: + public, - private, # protected\n"
         "Hard constraints:\n"
         "- Do not mix other diagram element families here (no component/queue/node/participant/object).\n"
-        "- If mixing is unavoidable, add `allowmixing`, but prefer separate diagrams."
+        "- Relationship arrows go on their OWN lines, never on a class declaration line."
     ),
     "sequence": (
         "Declare all participants at the top before any arrows.\n"
@@ -174,6 +195,38 @@ def lint_plantuml(diagram_type: str, puml: str) -> List[str]:
         if any(ln.lstrip().startswith(banned_prefixes) for ln in lines):
             issues.append("Class diagram contains non-class elements (component/queue/node/participant/object). Keep to class syntax only.")
 
+        # Detect class/interface/abstract declarations that incorrectly embed a
+        # relationship arrow on the same line, e.g.:
+        #   class Foo <|-- Bar {        ← INVALID
+        #   abstract class A --|> B     ← INVALID
+        # PlantUML requires: class body declaration and relationship arrows on
+        # separate lines.
+        _cls_decl_arrow_re = re.compile(
+            r"^\s*(abstract\s+class|class|interface|enum)\s+\S.*"
+            r"(<\|--|--\|>|\*--|--\*|o--|--o|<--|-+>|\.\.>|<\.\.)",
+            re.IGNORECASE,
+        )
+        for ln in lines:
+            if _cls_decl_arrow_re.match(ln):
+                issues.append(
+                    "Class declaration line contains a relationship arrow — PlantUML does NOT "
+                    "allow combining 'class Foo <|-- Bar {' on one line. "
+                    "Declare the class body separately, then add the arrow on its own line: "
+                    "'class Foo { }\\nFoo <|-- Bar'"
+                )
+                break
+
+        # Detect Java/Python-style inheritance keywords that are not valid PlantUML.
+        _java_inherit_re = re.compile(
+            r"^\s*(class|abstract\s+class|interface)\s+\S+\s+(extends|implements|inherits)\s+",
+            re.IGNORECASE,
+        )
+        if any(_java_inherit_re.match(ln) for ln in lines):
+            issues.append(
+                "Class diagram uses Java/Python-style 'extends'/'implements' keywords. "
+                "Use PlantUML arrows instead: Child <|-- Parent  or  Class ..|> Interface"
+            )
+
     if diagram_type == "object":
         banned_prefixes = ("class ", "component ", "queue ", "node ", "participant ", "actor ")
         if any(ln.lstrip().startswith(banned_prefixes) for ln in lines):
@@ -235,6 +288,12 @@ def load_model(model: str, tp: int, max_model_len: int,
 
 
 def make_sampling_params(max_tokens: int, temperature: float = 0.0) -> SamplingParams:
+    if max_tokens < 1:
+        raise ValueError(
+            f"make_sampling_params called with max_tokens={max_tokens}. "
+            "Pass --max-tokens (default 2048) or --registry-tokens / --extract-tokens "
+            "with a value ≥ 1."
+        )
     return SamplingParams(
         temperature=temperature,
         top_p=1.0,
@@ -249,16 +308,154 @@ def format_prompt(tokenizer, system_msg: str, user_msg: str) -> str:
     Format a chat prompt using the model's own chat template if available,
     falling back to a plain System/User/Assistant format.
     """
+    import warnings
     try:
         messages = [
             {"role": "system",    "content": system_msg},
             {"role": "user",      "content": user_msg},
         ]
-        return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        # tokenize=False is intentional — we need a string, not token ids.
+        # Wrap in catch_warnings to suppress the MistralCommonTokenizer advisory.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
     except Exception:
         return f"System: {system_msg}\n\nUser: {user_msg}\n\nAssistant:"
+
+
+def _count_tokens(tokenizer, text: str) -> int:
+    """Return the token count for *text* using whatever interface the tokenizer exposes."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return len(tokenizer.encode(text, add_special_tokens=False))
+        except Exception:
+            pass
+        try:
+            return len(tokenizer(text)["input_ids"])
+        except Exception:
+            pass
+    # Last-resort estimate: ~3.5 chars / token (conservative for code)
+    return max(1, int(len(text) / 3.5))
+
+
+def _compress_extractions(extractions: List[Dict], level: int) -> List[Dict]:
+    """
+    Return a progressively slimmer copy of the extractions list so that the
+    Pass 2 registry prompt fits within the model's context window.
+
+    level 0 — original (full fidelity)
+    level 1 — drop per-class 'attributes'
+    level 2 — also drop 'imports' per file
+    level 3 — also truncate 'methods' to first 5 per class
+    level 4 — also drop per-class 'relationships'
+    level 5 — also drop per-file 'relationships'
+    level 6 — keep only file, classes (name+bases only), functions[:10], summary
+    level 7 — keep only file, class names (strings), summary  (minimum viable)
+    """
+    import copy
+    result = []
+    for ex in extractions:
+        e = copy.deepcopy(ex)
+        if level >= 1:
+            for cls in e.get("classes", []):
+                cls.pop("attributes", None)
+        if level >= 2:
+            e.pop("imports", None)
+        if level >= 3:
+            for cls in e.get("classes", []):
+                cls["methods"] = cls.get("methods", [])[:5]
+        if level >= 4:
+            for cls in e.get("classes", []):
+                cls.pop("relationships", None)
+        if level >= 5:
+            e.pop("relationships", None)
+        if level >= 6:
+            slim_classes = [
+                {"name": c.get("name", ""), "bases": c.get("bases", [])}
+                for c in e.get("classes", [])
+            ]
+            e = {
+                "file":      e.get("file", ""),
+                "classes":   slim_classes,
+                "functions": e.get("functions", [])[:10],
+                "summary":   e.get("summary", ""),
+            }
+        if level >= 7:
+            e = {
+                "file":    e.get("file", ""),
+                "classes": [c.get("name", "") for c in e.get("classes", [])],
+                "summary": e.get("summary", ""),
+            }
+        result.append(e)
+    return result
+
+
+def _compress_registry(registry: Dict, level: int) -> Dict:
+    """
+    Return a progressively slimmer copy of the entity registry for use in
+    Pass 3 generation prompts, so the prompt fits within the model's context.
+
+    level 0 — original (full fidelity)
+    level 1 — drop per-class 'relationships'
+    level 2 — also truncate 'key_methods' to first 5 per class
+    level 3 — also drop 'bases' per class; slim modules to name+file only
+    level 4 — classes: name+file only; drop top_level_functions
+    level 5 — classes: names only (list of strings); modules: names only
+    level 6 — keep only class names, component names, entry_points, actors
+    level 7 — class names only (minimum viable for the LLM to use canonical names)
+    """
+    import copy
+    r = copy.deepcopy(registry)
+
+    if level >= 1:
+        for cls in r.get("classes", []):
+            cls.pop("relationships", None)
+
+    if level >= 2:
+        for cls in r.get("classes", []):
+            cls["key_methods"] = cls.get("key_methods", [])[:5]
+
+    if level >= 3:
+        for cls in r.get("classes", []):
+            cls.pop("bases", None)
+        r["modules"] = [
+            {"canonical_name": m.get("canonical_name", ""), "file": m.get("file", "")}
+            for m in r.get("modules", [])
+        ]
+
+    if level >= 4:
+        r["classes"] = [
+            {"canonical_name": c.get("canonical_name", ""), "defined_in": c.get("defined_in", "")}
+            for c in r.get("classes", [])
+        ]
+        r.pop("top_level_functions", None)
+
+    if level >= 5:
+        r["classes"]  = [c.get("canonical_name", "") for c in r.get("classes", [])]
+        r["modules"]  = [m.get("canonical_name", "") if isinstance(m, dict)
+                         else m for m in r.get("modules", [])]
+
+    if level >= 6:
+        r = {
+            "repo_name":    r.get("repo_name", ""),
+            "classes":      r.get("classes", []),
+            "components":   r.get("components", []),
+            "actors":       r.get("actors", []),
+            "entry_points": r.get("entry_points", []),
+            "states":       r.get("states", []),
+        }
+
+    if level >= 7:
+        r = {
+            "repo_name": r.get("repo_name", ""),
+            "classes":   r.get("classes", []),
+        }
+
+    return r
 
 
 def vllm_generate_batch(
@@ -538,6 +735,305 @@ _CLASS_MIXED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Detect a class/interface/abstract declaration that also contains a relationship arrow —
+# PlantUML does not permit combining body declaration and arrows on the same line.
+# Example of INVALID syntax caught here:
+#   class LocalFileWriter <|-- FileWriter {
+#   abstract class A --|> Iface
+_CLASS_DECL_ARROW_RE = re.compile(
+    r"^\s*(abstract\s+class|class|interface|enum)\s+\S.*"
+    r"(<\|--|--\|>|\*--|--\*|o--|--o|<\.\.|\.\.|>|<--|-+>)",
+    re.IGNORECASE,
+)
+
+# Detect Java/Python-style inheritance keywords that are not valid PlantUML.
+_JAVA_INHERIT_RE = re.compile(
+    r"^\s*(abstract\s+class|class|interface)\s+\S+\s+(extends|implements|inherits)\s+",
+    re.IGNORECASE,
+)
+
+def repair_class_diagram_lines(puml: str) -> str:
+    """
+    Post-process a class diagram to split lines that combine a class body
+    declaration with a relationship arrow — a common LLM mistake that causes
+    PlantUML syntax errors.
+
+    Examples repaired:
+      BEFORE: class LocalFileWriter <|-- FileWriter {
+      AFTER:  class LocalFileWriter {
+              }
+              LocalFileWriter <|-- FileWriter
+
+      BEFORE: abstract class A --|> IFoo
+      AFTER:  abstract class A {
+              }
+              A --|> IFoo
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Matches: (class-kw) (ClassName) (optional-stereotype) (arrow) (OtherName) (optional-{)
+    _split_re = re.compile(
+        r"^(\s*)(abstract\s+class|class|interface|enum)"   # group 1=indent, 2=kw
+        r"\s+(\w+)"                                        # group 3=ClassName
+        r"(\s+<<[^>]+>>)?"                                 # group 4=optional stereotype
+        r"\s*(<\|--|--\|>|\*--|--\*|o--|--o|<\.\.|\.\.|>|<--|-+>)"  # group 5=arrow
+        r"\s*(\w+)"                                        # group 6=OtherName
+        r"\s*(\{?).*$",                                    # group 7=optional {
+        re.IGNORECASE,
+    )
+
+    out_lines: List[str] = []
+    deferred_arrows: List[str] = []
+    skip_next_close_brace = False  # consume orphaned } after a split combined line
+
+    for ln in puml.splitlines():
+        # If the previous iteration split a "class Foo <|-- Bar {" line, the LLM's
+        # matching closing "}" is now orphaned — skip exactly one such line.
+        if skip_next_close_brace and ln.strip() == "}":
+            skip_next_close_brace = False
+            continue
+
+        m = _split_re.match(ln)
+        if m:
+            indent, kw, cls_name, stereo, arrow, other_name, brace = m.groups()
+            stereo = stereo or ""
+            out_lines.append(f"{indent}{kw} {cls_name}{stereo} {{")
+            out_lines.append(f"{indent}}}")
+            skip_next_close_brace = bool(brace)
+            deferred_arrows.append(f"{indent}{cls_name} {arrow} {other_name}")
+        else:
+            if ln.strip() == "@enduml" and deferred_arrows:
+                out_lines.extend(deferred_arrows)
+                deferred_arrows.clear()
+            out_lines.append(ln)
+
+    if deferred_arrows:
+        out_lines.extend(deferred_arrows)
+
+    return "\n".join(out_lines)
+
+
+def repair_duplicate_aliases(puml: str) -> str:
+    """
+    Detect and fix duplicate `as <alias>` declarations in any PlantUML diagram.
+
+    The LLM commonly produces collisions when multiple element names share the
+    same initials (e.g. MqttPublisher → mp, MessageProcessor → mp).
+
+    Strategy
+    --------
+    1. Parse every declaration line that ends with `as <alias>`.
+    2. On the first occurrence of an alias, keep it unchanged.
+    3. On every subsequent collision, generate a new unique alias by appending
+       an incrementing numeric suffix (mp2, mp3, …) and rewrite ALL references
+       to the old alias in the remainder of the diagram.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    _AS_RE = re.compile(
+        r"^(\s*(?:object|class|abstract\s+class|interface|enum|participant|actor"
+        r"|component|node|database|cloud|queue|artifact|rectangle|frame|package"
+        r"|usecase|state|boundary|control|entity|collections|(?:create\s+)?[\w]+)"
+        r"\s+.+?\bas\s+)(\w+)(\s*(?:#\S+)?\s*)$",
+        re.IGNORECASE,
+    )
+
+    lines = puml.splitlines()
+    seen: Dict[str, int] = {}       # alias → count of times seen so far
+    renames: Dict[str, str] = {}    # old_alias → new_alias for in-flight rewrites
+
+    out: List[str] = []
+    for ln in lines:
+        m = _AS_RE.match(ln)
+        if m:
+            prefix, alias, suffix = m.group(1), m.group(2), m.group(3)
+            if alias not in seen:
+                seen[alias] = 1
+                out.append(ln)
+            else:
+                seen[alias] += 1
+                new_alias = f"{alias}{seen[alias]}"
+                while new_alias in seen:
+                    seen[alias] += 1
+                    new_alias = f"{alias}{seen[alias]}"
+                seen[new_alias] = 1
+                renames[alias] = new_alias
+                out.append(f"{prefix}{new_alias}{suffix}")
+                print(f"      [REPAIR] Duplicate alias '{alias}' → renamed to '{new_alias}'")
+        else:
+            if renames:
+                for old, new in renames.items():
+                    ln = re.sub(rf"\b{re.escape(old)}\b", new, ln)
+            out.append(ln)
+
+    return "\n".join(out)
+
+
+def repair_unquoted_multiword_edges(puml: str) -> str:
+    """
+    Fix edge lines where a multi-word element name is used bare (without quotes
+    or an alias), which causes a PlantUML syntax error.
+
+    Example of the bug:
+        node "Local Machine" {        ← declared with quotes, no alias
+            ...
+        }
+        Local Machine --> MQTT        ← ERROR: unquoted multi-word source
+
+    Two-pass strategy
+    -----------------
+    Pass 1: Collect every element name that was declared with quotes but has NO
+            `as <alias>` clause.  Also collect every declared alias so we know
+            what short names already exist.
+
+    Pass 2: On edge lines (lines containing -->, <--, <-->, ..>, <..) scan the
+            LHS and RHS tokens.  If a contiguous run of bare words (no quotes,
+            not an alias) matches a known multi-word name, wrap it in quotes.
+            This makes `Local Machine --> MQTT` become `"Local Machine" --> MQTT`.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Matches any quoted-name declaration, optionally with `as alias`
+    # Captures: (quoted_name, alias_or_empty)
+    _DECL_RE = re.compile(
+        r'^\s*(?:node|component|artifact|database|cloud|queue|rectangle|frame'
+        r'|package|actor|participant|object|class|interface|usecase|state'
+        r'|boundary|control|entity|storage|agent|card|collections)\s+'
+        r'"([^"]+)"'                  # group 1: the quoted display name
+        r'(?:\s+as\s+(\w+))?',       # group 2: optional alias
+        re.IGNORECASE,
+    )
+
+    # Arrow pattern for edge lines
+    _EDGE_RE = re.compile(
+        r'(-->|<--|<-->|\.{2}>|<\.{2}|\*--|o--|<\|--|--\|>|-+>)',
+        re.IGNORECASE,
+    )
+
+    lines = puml.splitlines()
+
+    # Pass 1: build set of multi-word names that have NO alias
+    unaliased_multiword: set = set()
+    all_aliases: set = set()
+    for ln in lines:
+        m = _DECL_RE.match(ln)
+        if m:
+            name, alias = m.group(1), m.group(2)
+            if alias:
+                all_aliases.add(alias)
+            elif " " in name:
+                unaliased_multiword.add(name)
+
+    if not unaliased_multiword:
+        return puml  # nothing to fix
+
+    # Sort longest-first so "Local Machine Alpha" is tried before "Local Machine"
+    candidates = sorted(unaliased_multiword, key=len, reverse=True)
+
+    out: List[str] = []
+    for ln in lines:
+        if _EDGE_RE.search(ln) and not ln.strip().startswith("'"):
+            original = ln
+            for name in candidates:
+                # Only replace bare (unquoted) occurrences
+                # Use a word-boundary-aware pattern that won't touch already-quoted names
+                pat = r'(?<!")\b' + re.escape(name) + r'\b(?!")'
+                if re.search(pat, ln):
+                    ln = re.sub(pat, f'"{name}"', ln)
+            if ln != original:
+                print(f"      [REPAIR] Quoted multi-word name on edge: {original.strip()!r} → {ln.strip()!r}")
+        out.append(ln)
+
+    return "\n".join(out)
+
+
+def repair_truncated_activity(puml: str) -> str:
+    """
+    Fix activity diagrams that were truncated mid-generation (hit max_tokens).
+
+    Two symptoms:
+    1. Last action line is missing its closing semicolon:
+           :Initialize Dummy        ← should be  :Initialize Dummy;
+    2. Diagram has no `stop` / `end` before @enduml — PlantUML requires one.
+
+    We fix both unconditionally for activity diagrams.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    lines = puml.splitlines()
+
+    # Find the last non-blank, non-@enduml line
+    body_lines = []
+    enduml_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == "@enduml":
+            enduml_idx = i
+        else:
+            body_lines.append((i, ln))
+
+    if not body_lines:
+        return puml
+
+    last_idx, last_ln = body_lines[-1]
+    stripped = last_ln.strip()
+
+    # Fix dangling action (starts with : but no closing ;)
+    if stripped.startswith(":") and not stripped.endswith(";"):
+        lines[last_idx] = last_ln.rstrip() + ";"
+        stripped = lines[last_idx].strip()
+        print(f"      [REPAIR] Closed dangling activity action: {stripped!r}")
+
+    # Ensure a stop/end exists before @enduml
+    has_terminator = any(
+        ln.strip() in ("stop", "end", "detach", "kill")
+        for ln in lines
+        if ln.strip() not in ("@startuml", "@enduml", "")
+    )
+    if not has_terminator:
+        insert_at = enduml_idx if enduml_idx is not None else len(lines)
+        lines.insert(insert_at, "stop")
+        print("      [REPAIR] Inserted missing 'stop' before @enduml")
+
+    return "\n".join(lines)
+
+
+def repair_slash_names(puml: str) -> str:
+    """
+    Quote any bare element names that contain '/' (e.g. HTTP/HTTPS, TCP/IP).
+
+    PlantUML misparses 'HTTP/HTTPS' as a comment or sequence token.
+    This fix applies to declaration lines AND edge lines.
+
+    Declaration:  HTTP/HTTPS                     →  "HTTP/HTTPS"
+    Declaration:  component HTTP/HTTPS           →  component "HTTP/HTTPS"
+    Declaration:  component HTTP/HTTPS as h      →  component "HTTP/HTTPS" as h
+    Edge:         HTTP/HTTPS --> Server           →  "HTTP/HTTPS" --> Server
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Match a bare word-with-slash token that is not already inside quotes.
+    # The token must contain at least one '/' and consist only of word chars and '/'.
+    _SLASH_TOKEN = re.compile(r'(?<!")\b([\w][\w/]*\/[\w/]*\w)\b(?!")')
+
+    out = []
+    for ln in puml.splitlines():
+        s = ln.strip()
+        if not s or s.startswith("'") or s.startswith("@") or s.startswith("'"):
+            out.append(ln)
+            continue
+        new_ln = _SLASH_TOKEN.sub(lambda m: f'"{m.group(1)}"', ln)
+        if new_ln != ln:
+            print(f"      [REPAIR] Quoted slash-name: {ln.strip()!r} → {new_ln.strip()!r}")
+        out.append(new_ln)
+
+    return "\n".join(out)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -545,6 +1041,21 @@ def extract_start_end_block(raw: str) -> str:
     if raw.strip():
         return f"@startuml\n{raw.strip()}\n@enduml"
     return ""
+
+def normalize_startuml_name(puml: str, uml_name: str) -> str:
+    """
+    Ensure the first @startuml line uses a deterministic name that matches the output file stem.
+    This prevents PlantUML from generating images with mismatched names and clobbering outputs.
+    """
+    if not puml:
+        return puml
+    lines = puml.splitlines()
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("@startuml"):
+            lines[i] = f"@startuml {uml_name}"
+            break
+    return "\n".join(lines)
 
 def validate_puml(diagram_type: str, puml: str) -> List[str]:
     errors: List[str] = []
@@ -572,6 +1083,18 @@ def validate_puml(diagram_type: str, puml: str) -> List[str]:
 
         if diagram_type == "class" and _CLASS_MIXED_RE.search(line):
             errors.append(f"line {i}: mixed non-class element in class diagram: {line.strip()}")
+
+        if diagram_type == "class" and _CLASS_DECL_ARROW_RE.match(line):
+            errors.append(
+                f"line {i}: class declaration combined with relationship arrow "
+                f"(not valid in PlantUML): {line.strip()}"
+            )
+
+        if diagram_type == "class" and _JAVA_INHERIT_RE.match(line):
+            errors.append(
+                f"line {i}: Java/Python-style inheritance keyword ('extends'/'implements') — "
+                f"use PlantUML arrows instead: {line.strip()}"
+            )
 
         if diagram_type == "sequence":
             # sequence must use -> not ->> (already caught), also discourage missing participant declarations,
@@ -629,14 +1152,44 @@ def pass2_build_registry(
     llm: LLM,
     tokenizer,
     max_tokens: int,
+    max_model_len: int = 32768,
 ) -> Dict:
-    user_msg = REGISTRY_TMPL.format(
-        repo_name=repo_name,
-        summaries_json=json.dumps(extractions, indent=2),
-    )
-    print(f"      Registry prompt: {len(user_msg):,} chars")
-    prompt = format_prompt(tokenizer, REGISTRY_SYSTEM, user_msg)
-    raw = vllm_generate_one(llm, prompt, max_tokens=max_tokens)
+    # Guard: max_tokens must be at least 1 to avoid consuming the entire context.
+    # Add CONTEXT_SAFETY_MARGIN so our check is always stricter than vLLM's hard limit.
+    effective_output = max(max_tokens, 1)
+    input_budget = max_model_len - effective_output - CONTEXT_SAFETY_MARGIN
+
+    # Try progressively slimmer representations of the extractions until the
+    # formatted prompt fits within the model's input token budget.
+    MAX_COMPRESS_LEVEL = 7
+    chosen_prompt = None
+    for level in range(MAX_COMPRESS_LEVEL + 1):
+        slim = _compress_extractions(extractions, level)
+        user_msg = REGISTRY_TMPL.format(
+            repo_name=repo_name,
+            summaries_json=json.dumps(slim, indent=2),
+        )
+        prompt = format_prompt(tokenizer, REGISTRY_SYSTEM, user_msg)
+        n_tokens = _count_tokens(tokenizer, prompt)
+        if level == 0:
+            print(f"      Registry prompt: {len(user_msg):,} chars  ({n_tokens:,} tokens)")
+        if n_tokens <= input_budget:
+            if level > 0:
+                print(f"      [INFO] Compressed extractions to level {level} "
+                      f"({n_tokens:,} tokens ≤ budget {input_budget:,})")
+            chosen_prompt = prompt
+            break
+        else:
+            print(f"      [WARN] Level {level}: {n_tokens:,} tokens > budget {input_budget:,} "
+                  f"— compressing further…")
+
+    if chosen_prompt is None:
+        # Absolute last resort: send level-7 anyway and let vLLM hard-truncate
+        print("      [ERROR] Could not fit registry prompt even at maximum compression. "
+              "Sending anyway — expect a vLLM truncation error or degraded output.")
+        chosen_prompt = prompt  # last attempted prompt from the loop
+
+    raw = vllm_generate_one(llm, chosen_prompt, max_tokens=max_tokens)
     registry = _parse_json(raw)
     if registry:
         return registry
@@ -677,6 +1230,7 @@ def select_chunks(
     diagram_type: str,
     files: List[Tuple[str, str]],
     registry: Dict,
+    char_budget: int = GENERATION_CHUNK_BUDGET,
 ) -> str:
     entry_set = set(registry.get("entry_points", []))
     if diagram_type in ENTRY_POINT_DIAGRAMS:
@@ -690,8 +1244,8 @@ def select_chunks(
     chunks, total = [], 0
     for rel, src in ordered:
         block = f"===== FILE: {rel} =====\n{src[:MAX_CHARS_PER_FILE]}\n"
-        if total + len(block) > GENERATION_CHUNK_BUDGET:
-            rem = GENERATION_CHUNK_BUDGET - total
+        if total + len(block) > char_budget:
+            rem = char_budget - total
             if rem > 200:
                 chunks.append(f"===== FILE: {rel} (truncated) =====\n{src[:rem]}\n")
             break
@@ -709,25 +1263,118 @@ def pass3_generate_all(
     llm: LLM,
     tokenizer,
     max_tokens: int,
+    max_model_len: int = 32768,
 ) -> Dict[str, str]:
     """
     Build all 8 diagram prompts, submit as one batch.
     If a diagram fails lightweight validation, retry that diagram once with a repair prompt.
+
+    For models with tight context windows (e.g. Mistral-Large at 32k), the
+    combined prompt (system + registry JSON + RAG examples + code chunks) can
+    exceed the input budget even when GENERATION_CHUNK_BUDGET looks safe in
+    characters.  We therefore measure the *token* overhead for each diagram
+    type's fixed parts (registry + RAG + template boilerplate) and compute a
+    per-diagram code-chunk character budget that guarantees the prompt fits.
     """
+    # Guard: max_tokens must be at least 1 to avoid consuming the entire context.
+    # Add CONTEXT_SAFETY_MARGIN so our check is always stricter than vLLM's hard limit.
+    effective_output = max(max_tokens, 1)
+    input_budget = max_model_len - effective_output - CONTEXT_SAFETY_MARGIN
+
     dtypes  = [dt for dt, _ in diagram_types]
     prompts: List[str] = []
-    user_msgs: Dict[str, str] = {}
+
+    MAX_REG_LEVEL = 7
+
     for dtype, desc in diagram_types:
-        user_msg = GENERATION_TMPL.format(
-            dtype_upper=dtype.upper(),
-            repo_name=repo_name,
-            description=desc,
-            syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
-            registry_json=json.dumps(registry, indent=2),
-            code_chunks=select_chunks(dtype, files, registry),
-            rag_examples=rag_by_type.get(dtype, ""),
-        )
-        prompts.append(format_prompt(tokenizer, GENERATION_SYSTEM, user_msg))
+        rag_examples = rag_by_type.get(dtype, "")
+
+        # ── Find the lowest registry compression level that fits ──
+        # We try increasing compression until both the fixed overhead fits AND
+        # there are tokens left over for at least some code chunks.
+        chosen_prompt = None
+        for reg_level in range(MAX_REG_LEVEL + 1):
+            slim_registry = _compress_registry(registry, reg_level)
+            registry_json = json.dumps(slim_registry, indent=2)
+
+            # Step 1: measure fixed overhead (no code chunks yet)
+            user_msg_empty = GENERATION_TMPL.format(
+                dtype_upper=dtype.upper(),
+                repo_name=repo_name,
+                description=desc,
+                syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+                registry_json=registry_json,
+                code_chunks="",
+                rag_examples=rag_examples,
+            )
+            overhead_tokens = _count_tokens(
+                tokenizer, format_prompt(tokenizer, GENERATION_SYSTEM, user_msg_empty)
+            )
+
+            if overhead_tokens > input_budget:
+                if reg_level == 0:
+                    print(f"      [WARN] {dtype}: full registry overhead "
+                          f"({overhead_tokens} tok) > budget ({input_budget} tok) "
+                          f"— compressing registry…")
+                continue  # try next compression level
+
+            # Overhead fits — now compute code chunk budget
+            remaining_tokens = input_budget - overhead_tokens
+            char_budget = int(remaining_tokens * 3.0)
+            char_budget = min(char_budget, GENERATION_CHUNK_BUDGET)
+            code_chunks = select_chunks(dtype, files, registry, char_budget) if char_budget > 200 else ""
+
+            # Verify full prompt and shrink code chunks if still over
+            user_msg = GENERATION_TMPL.format(
+                dtype_upper=dtype.upper(),
+                repo_name=repo_name,
+                description=desc,
+                syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+                registry_json=registry_json,
+                code_chunks=code_chunks,
+                rag_examples=rag_examples,
+            )
+            prompt_candidate = format_prompt(tokenizer, GENERATION_SYSTEM, user_msg)
+            n_tokens = _count_tokens(tokenizer, prompt_candidate)
+
+            shrink = 0
+            while n_tokens > input_budget and char_budget > 500:
+                char_budget = int(char_budget * 0.85)
+                shrink += 1
+                code_chunks = select_chunks(dtype, files, registry, char_budget)
+                user_msg = GENERATION_TMPL.format(
+                    dtype_upper=dtype.upper(),
+                    repo_name=repo_name,
+                    description=desc,
+                    syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+                    registry_json=registry_json,
+                    code_chunks=code_chunks,
+                    rag_examples=rag_examples,
+                )
+                prompt_candidate = format_prompt(tokenizer, GENERATION_SYSTEM, user_msg)
+                n_tokens = _count_tokens(tokenizer, prompt_candidate)
+
+            if reg_level > 0 or shrink:
+                print(f"      [INFO] {dtype}: registry level {reg_level}, "
+                      f"code_chunks shrunk {shrink}x → {n_tokens:,} tokens")
+
+            chosen_prompt = prompt_candidate
+            break
+
+        if chosen_prompt is None:
+            # Even level-7 registry overflows — send it anyway, vLLM will error
+            # but this is a genuinely pathological repo for this context size.
+            print(f"      [ERROR] {dtype}: cannot fit even minimal registry in "
+                  f"{input_budget} token budget. Sending anyway.")
+            chosen_prompt = format_prompt(tokenizer, GENERATION_SYSTEM,
+                GENERATION_TMPL.format(
+                    dtype_upper=dtype.upper(), repo_name=repo_name,
+                    description=desc, syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+                    registry_json=json.dumps(_compress_registry(registry, 7), indent=2),
+                    code_chunks="", rag_examples="",
+                ))
+
+        prompts.append(chosen_prompt)
 
     print(f"      Submitting {len(prompts)} diagram prompts as one batch...")
     raw_outputs = vllm_generate_batch(llm, prompts, max_tokens=max_tokens)
@@ -736,7 +1383,16 @@ def pass3_generate_all(
     raw_by_type: Dict[str, str] = {}
     for dtype, raw in zip(dtypes, raw_outputs):
         raw_by_type[dtype] = raw
-        results[dtype] = extract_start_end_block(raw)
+        puml = extract_start_end_block(raw)
+        # Auto-repair common structural mistakes before validation
+        puml = repair_duplicate_aliases(puml)
+        puml = repair_unquoted_multiword_edges(puml)
+        puml = repair_slash_names(puml)
+        if dtype == "activity":
+            puml = repair_truncated_activity(puml)
+        if dtype == "class":
+            puml = repair_class_diagram_lines(puml)
+        results[dtype] = puml
 
     # One retry per failing diagram type (only for the known failure patterns)
     retry_types: List[str] = []
@@ -759,6 +1415,13 @@ def pass3_generate_all(
         retry_raw = vllm_generate_batch(llm, retry_prompts, max_tokens=max_tokens)
         for dtype, raw in zip(retry_types, retry_raw):
             repaired = extract_start_end_block(raw)
+            repaired = repair_duplicate_aliases(repaired)
+            repaired = repair_unquoted_multiword_edges(repaired)
+            repaired = repair_slash_names(repaired)
+            if dtype == "activity":
+                repaired = repair_truncated_activity(repaired)
+            if dtype == "class":
+                repaired = repair_class_diagram_lines(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
             errs = validate_puml(dtype, repaired)
             if errs:
@@ -877,7 +1540,7 @@ def main() -> None:
 
         # Pass 2 — registry normalization
         print(f"\n[6] Pass 2 — normalizing {len(extractions)} extractions → Entity Registry...")
-        registry = pass2_build_registry(extractions, repo_name, llm, tokenizer, args.registry_tokens)
+        registry = pass2_build_registry(extractions, repo_name, llm, tokenizer, args.registry_tokens, args.max_model_len)
         print(f"    {len(registry.get('classes',[]))} classes  "
               f"{len(registry.get('modules',[]))} modules  "
               f"{len(registry.get('components',[]))} components")
@@ -901,6 +1564,7 @@ def main() -> None:
         llm=llm,
         tokenizer=tokenizer,
         max_tokens=args.max_tokens,
+        max_model_len=args.max_model_len,
     )
 
     print("\n[8] Writing diagram files...")
@@ -909,7 +1573,9 @@ def main() -> None:
         puml = diagrams.get(dtype, "").strip()
         if not puml:
             print(f"    ✗ {dtype} — empty output, skipped"); continue
-        out_path = os.path.join(output_dir, f"{repo_name}_{dtype}.puml")
+        uml_name = f"{repo_name}_{dtype}"
+        puml = normalize_startuml_name(puml, uml_name).strip()
+        out_path = os.path.join(output_dir, f"{uml_name}.puml")
         open(out_path, "w").write(puml)
         print(f"    ✓ {out_path}  ({len(puml):,} chars)")
         written += 1
