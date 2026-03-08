@@ -391,6 +391,70 @@ def _compress_extractions(extractions: List[Dict], level: int) -> List[Dict]:
     return result
 
 
+def _compress_registry(registry: Dict, level: int) -> Dict:
+    """
+    Return a progressively slimmer copy of the entity registry for use in
+    Pass 3 generation prompts, so the prompt fits within the model's context.
+
+    level 0 — original (full fidelity)
+    level 1 — drop per-class 'relationships'
+    level 2 — also truncate 'key_methods' to first 5 per class
+    level 3 — also drop 'bases' per class; slim modules to name+file only
+    level 4 — classes: name+file only; drop top_level_functions
+    level 5 — classes: names only (list of strings); modules: names only
+    level 6 — keep only class names, component names, entry_points, actors
+    level 7 — class names only (minimum viable for the LLM to use canonical names)
+    """
+    import copy
+    r = copy.deepcopy(registry)
+
+    if level >= 1:
+        for cls in r.get("classes", []):
+            cls.pop("relationships", None)
+
+    if level >= 2:
+        for cls in r.get("classes", []):
+            cls["key_methods"] = cls.get("key_methods", [])[:5]
+
+    if level >= 3:
+        for cls in r.get("classes", []):
+            cls.pop("bases", None)
+        r["modules"] = [
+            {"canonical_name": m.get("canonical_name", ""), "file": m.get("file", "")}
+            for m in r.get("modules", [])
+        ]
+
+    if level >= 4:
+        r["classes"] = [
+            {"canonical_name": c.get("canonical_name", ""), "defined_in": c.get("defined_in", "")}
+            for c in r.get("classes", [])
+        ]
+        r.pop("top_level_functions", None)
+
+    if level >= 5:
+        r["classes"]  = [c.get("canonical_name", "") for c in r.get("classes", [])]
+        r["modules"]  = [m.get("canonical_name", "") if isinstance(m, dict)
+                         else m for m in r.get("modules", [])]
+
+    if level >= 6:
+        r = {
+            "repo_name":    r.get("repo_name", ""),
+            "classes":      r.get("classes", []),
+            "components":   r.get("components", []),
+            "actors":       r.get("actors", []),
+            "entry_points": r.get("entry_points", []),
+            "states":       r.get("states", []),
+        }
+
+    if level >= 7:
+        r = {
+            "repo_name": r.get("repo_name", ""),
+            "classes":   r.get("classes", []),
+        }
+
+    return r
+
+
 def vllm_generate_batch(
     llm: LLM,
     prompts: List[str],
@@ -1133,44 +1197,53 @@ def pass3_generate_all(
     dtypes  = [dt for dt, _ in diagram_types]
     prompts: List[str] = []
 
+    MAX_REG_LEVEL = 7
+
     for dtype, desc in diagram_types:
         rag_examples = rag_by_type.get(dtype, "")
 
-        # ── Step 1: measure fixed overhead (prompt with empty code_chunks) ──
-        user_msg_empty = GENERATION_TMPL.format(
-            dtype_upper=dtype.upper(),
-            repo_name=repo_name,
-            description=desc,
-            syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
-            registry_json=json.dumps(registry, indent=2),
-            code_chunks="",
-            rag_examples=rag_examples,
-        )
-        overhead_tokens = _count_tokens(
-            tokenizer, format_prompt(tokenizer, GENERATION_SYSTEM, user_msg_empty)
-        )
+        # ── Find the lowest registry compression level that fits ──
+        # We try increasing compression until both the fixed overhead fits AND
+        # there are tokens left over for at least some code chunks.
+        chosen_prompt = None
+        for reg_level in range(MAX_REG_LEVEL + 1):
+            slim_registry = _compress_registry(registry, reg_level)
+            registry_json = json.dumps(slim_registry, indent=2)
 
-        # ── Step 2: derive how many chars we can afford for code_chunks ──
-        remaining_tokens = input_budget - overhead_tokens
-        if remaining_tokens <= 0:
-            # Registry + RAG alone already overflow — skip code chunks entirely
-            print(f"      [WARN] {dtype}: fixed overhead ({overhead_tokens} tok) already "
-                  f"exceeds budget ({input_budget} tok). Omitting code chunks.")
-            code_chunks = ""
-        else:
-            # Empirical ratio: Mistral ≈ 3.2 chars/token for mixed code+prose.
-            # Use 3.0 to stay conservative (under-estimate chars, ensuring fit).
+            # Step 1: measure fixed overhead (no code chunks yet)
+            user_msg_empty = GENERATION_TMPL.format(
+                dtype_upper=dtype.upper(),
+                repo_name=repo_name,
+                description=desc,
+                syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+                registry_json=registry_json,
+                code_chunks="",
+                rag_examples=rag_examples,
+            )
+            overhead_tokens = _count_tokens(
+                tokenizer, format_prompt(tokenizer, GENERATION_SYSTEM, user_msg_empty)
+            )
+
+            if overhead_tokens > input_budget:
+                if reg_level == 0:
+                    print(f"      [WARN] {dtype}: full registry overhead "
+                          f"({overhead_tokens} tok) > budget ({input_budget} tok) "
+                          f"— compressing registry…")
+                continue  # try next compression level
+
+            # Overhead fits — now compute code chunk budget
+            remaining_tokens = input_budget - overhead_tokens
             char_budget = int(remaining_tokens * 3.0)
-            char_budget = min(char_budget, GENERATION_CHUNK_BUDGET)  # never exceed global cap
-            code_chunks = select_chunks(dtype, files, registry, char_budget)
+            char_budget = min(char_budget, GENERATION_CHUNK_BUDGET)
+            code_chunks = select_chunks(dtype, files, registry, char_budget) if char_budget > 200 else ""
 
-            # ── Step 3: verify and shrink further if still over ──
+            # Verify full prompt and shrink code chunks if still over
             user_msg = GENERATION_TMPL.format(
                 dtype_upper=dtype.upper(),
                 repo_name=repo_name,
                 description=desc,
                 syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
-                registry_json=json.dumps(registry, indent=2),
+                registry_json=registry_json,
                 code_chunks=code_chunks,
                 rag_examples=rag_examples,
             )
@@ -1187,27 +1260,34 @@ def pass3_generate_all(
                     repo_name=repo_name,
                     description=desc,
                     syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
-                    registry_json=json.dumps(registry, indent=2),
+                    registry_json=registry_json,
                     code_chunks=code_chunks,
                     rag_examples=rag_examples,
                 )
                 prompt_candidate = format_prompt(tokenizer, GENERATION_SYSTEM, user_msg)
                 n_tokens = _count_tokens(tokenizer, prompt_candidate)
 
-            if shrink:
-                print(f"      [INFO] {dtype}: shrunk code_chunks {shrink}x "
-                      f"→ {char_budget:,} chars / {n_tokens:,} tokens")
+            if reg_level > 0 or shrink:
+                print(f"      [INFO] {dtype}: registry level {reg_level}, "
+                      f"code_chunks shrunk {shrink}x → {n_tokens:,} tokens")
 
-        user_msg = GENERATION_TMPL.format(
-            dtype_upper=dtype.upper(),
-            repo_name=repo_name,
-            description=desc,
-            syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
-            registry_json=json.dumps(registry, indent=2),
-            code_chunks=code_chunks,
-            rag_examples=rag_examples,
-        )
-        prompts.append(format_prompt(tokenizer, GENERATION_SYSTEM, user_msg))
+            chosen_prompt = prompt_candidate
+            break
+
+        if chosen_prompt is None:
+            # Even level-7 registry overflows — send it anyway, vLLM will error
+            # but this is a genuinely pathological repo for this context size.
+            print(f"      [ERROR] {dtype}: cannot fit even minimal registry in "
+                  f"{input_budget} token budget. Sending anyway.")
+            chosen_prompt = format_prompt(tokenizer, GENERATION_SYSTEM,
+                GENERATION_TMPL.format(
+                    dtype_upper=dtype.upper(), repo_name=repo_name,
+                    description=desc, syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+                    registry_json=json.dumps(_compress_registry(registry, 7), indent=2),
+                    code_chunks="", rag_examples="",
+                ))
+
+        prompts.append(chosen_prompt)
 
     print(f"      Submitting {len(prompts)} diagram prompts as one batch...")
     raw_outputs = vllm_generate_batch(llm, prompts, max_tokens=max_tokens)
