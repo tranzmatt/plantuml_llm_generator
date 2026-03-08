@@ -62,6 +62,11 @@ ENTRY_POINT_DIAGRAMS = {"sequence", "activity", "state", "usecase"}
 
 MAX_CHARS_PER_FILE       = 6_000
 GENERATION_CHUNK_BUDGET  = 24_000
+# Extra token headroom subtracted from every input budget check.
+# _count_tokens() can disagree with vLLM's internal tokenizer by a few tokens
+# (different BOS/EOS handling, special tokens, etc.).  A margin of 64 ensures
+# our pre-check is always stricter than vLLM's hard limit.
+CONTEXT_SAFETY_MARGIN    = 64
 
 # ---------------------------------------------------------------------------
 # Per-diagram syntax rules injected into every generation prompt
@@ -280,6 +285,12 @@ def load_model(model: str, tp: int, max_model_len: int,
 
 
 def make_sampling_params(max_tokens: int, temperature: float = 0.0) -> SamplingParams:
+    if max_tokens < 1:
+        raise ValueError(
+            f"make_sampling_params called with max_tokens={max_tokens}. "
+            "Pass --max-tokens (default 2048) or --registry-tokens / --extract-tokens "
+            "with a value ≥ 1."
+        )
     return SamplingParams(
         temperature=temperature,
         top_p=1.0,
@@ -992,7 +1003,10 @@ def pass2_build_registry(
     max_tokens: int,
     max_model_len: int = 32768,
 ) -> Dict:
-    input_budget = max_model_len - max_tokens  # tokens available for the prompt
+    # Guard: max_tokens must be at least 1 to avoid consuming the entire context.
+    # Add CONTEXT_SAFETY_MARGIN so our check is always stricter than vLLM's hard limit.
+    effective_output = max(max_tokens, 1)
+    input_budget = max_model_len - effective_output - CONTEXT_SAFETY_MARGIN
 
     # Try progressively slimmer representations of the extractions until the
     # formatted prompt fits within the model's input token budget.
@@ -1111,7 +1125,10 @@ def pass3_generate_all(
     type's fixed parts (registry + RAG + template boilerplate) and compute a
     per-diagram code-chunk character budget that guarantees the prompt fits.
     """
-    input_budget = max_model_len - max_tokens   # tokens available for the prompt
+    # Guard: max_tokens must be at least 1 to avoid consuming the entire context.
+    # Add CONTEXT_SAFETY_MARGIN so our check is always stricter than vLLM's hard limit.
+    effective_output = max(max_tokens, 1)
+    input_budget = max_model_len - effective_output - CONTEXT_SAFETY_MARGIN
 
     dtypes  = [dt for dt, _ in diagram_types]
     prompts: List[str] = []
