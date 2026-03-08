@@ -43,6 +43,9 @@ import requests
 from sentence_transformers import SentenceTransformer
 from vllm import LLM, SamplingParams
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="mistral_common")
+
 # ---------------------------------------------------------------------------
 # Diagram catalogue
 # ---------------------------------------------------------------------------
@@ -947,6 +950,90 @@ def repair_unquoted_multiword_edges(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_truncated_activity(puml: str) -> str:
+    """
+    Fix activity diagrams that were truncated mid-generation (hit max_tokens).
+
+    Two symptoms:
+    1. Last action line is missing its closing semicolon:
+           :Initialize Dummy        ← should be  :Initialize Dummy;
+    2. Diagram has no `stop` / `end` before @enduml — PlantUML requires one.
+
+    We fix both unconditionally for activity diagrams.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    lines = puml.splitlines()
+
+    # Find the last non-blank, non-@enduml line
+    body_lines = []
+    enduml_idx = None
+    for i, ln in enumerate(lines):
+        if ln.strip() == "@enduml":
+            enduml_idx = i
+        else:
+            body_lines.append((i, ln))
+
+    if not body_lines:
+        return puml
+
+    last_idx, last_ln = body_lines[-1]
+    stripped = last_ln.strip()
+
+    # Fix dangling action (starts with : but no closing ;)
+    if stripped.startswith(":") and not stripped.endswith(";"):
+        lines[last_idx] = last_ln.rstrip() + ";"
+        stripped = lines[last_idx].strip()
+        print(f"      [REPAIR] Closed dangling activity action: {stripped!r}")
+
+    # Ensure a stop/end exists before @enduml
+    has_terminator = any(
+        ln.strip() in ("stop", "end", "detach", "kill")
+        for ln in lines
+        if ln.strip() not in ("@startuml", "@enduml", "")
+    )
+    if not has_terminator:
+        insert_at = enduml_idx if enduml_idx is not None else len(lines)
+        lines.insert(insert_at, "stop")
+        print("      [REPAIR] Inserted missing 'stop' before @enduml")
+
+    return "\n".join(lines)
+
+
+def repair_slash_names(puml: str) -> str:
+    """
+    Quote any bare element names that contain '/' (e.g. HTTP/HTTPS, TCP/IP).
+
+    PlantUML misparses 'HTTP/HTTPS' as a comment or sequence token.
+    This fix applies to declaration lines AND edge lines.
+
+    Declaration:  HTTP/HTTPS                     →  "HTTP/HTTPS"
+    Declaration:  component HTTP/HTTPS           →  component "HTTP/HTTPS"
+    Declaration:  component HTTP/HTTPS as h      →  component "HTTP/HTTPS" as h
+    Edge:         HTTP/HTTPS --> Server           →  "HTTP/HTTPS" --> Server
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Match a bare word-with-slash token that is not already inside quotes.
+    # The token must contain at least one '/' and consist only of word chars and '/'.
+    _SLASH_TOKEN = re.compile(r'(?<!")\b([\w][\w/]*\/[\w/]*\w)\b(?!")')
+
+    out = []
+    for ln in puml.splitlines():
+        s = ln.strip()
+        if not s or s.startswith("'") or s.startswith("@") or s.startswith("'"):
+            out.append(ln)
+            continue
+        new_ln = _SLASH_TOKEN.sub(lambda m: f'"{m.group(1)}"', ln)
+        if new_ln != ln:
+            print(f"      [REPAIR] Quoted slash-name: {ln.strip()!r} → {new_ln.strip()!r}")
+        out.append(new_ln)
+
+    return "\n".join(out)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -1300,6 +1387,9 @@ def pass3_generate_all(
         # Auto-repair common structural mistakes before validation
         puml = repair_duplicate_aliases(puml)
         puml = repair_unquoted_multiword_edges(puml)
+        puml = repair_slash_names(puml)
+        if dtype == "activity":
+            puml = repair_truncated_activity(puml)
         if dtype == "class":
             puml = repair_class_diagram_lines(puml)
         results[dtype] = puml
@@ -1327,6 +1417,9 @@ def pass3_generate_all(
             repaired = extract_start_end_block(raw)
             repaired = repair_duplicate_aliases(repaired)
             repaired = repair_unquoted_multiword_edges(repaired)
+            repaired = repair_slash_names(repaired)
+            if dtype == "activity":
+                repaired = repair_truncated_activity(repaired)
             if dtype == "class":
                 repaired = repair_class_diagram_lines(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
