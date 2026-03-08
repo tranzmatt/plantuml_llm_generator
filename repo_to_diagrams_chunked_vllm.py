@@ -1065,6 +1065,7 @@ def select_chunks(
     diagram_type: str,
     files: List[Tuple[str, str]],
     registry: Dict,
+    char_budget: int = GENERATION_CHUNK_BUDGET,
 ) -> str:
     entry_set = set(registry.get("entry_points", []))
     if diagram_type in ENTRY_POINT_DIAGRAMS:
@@ -1078,8 +1079,8 @@ def select_chunks(
     chunks, total = [], 0
     for rel, src in ordered:
         block = f"===== FILE: {rel} =====\n{src[:MAX_CHARS_PER_FILE]}\n"
-        if total + len(block) > GENERATION_CHUNK_BUDGET:
-            rem = GENERATION_CHUNK_BUDGET - total
+        if total + len(block) > char_budget:
+            rem = char_budget - total
             if rem > 200:
                 chunks.append(f"===== FILE: {rel} (truncated) =====\n{src[:rem]}\n")
             break
@@ -1097,23 +1098,97 @@ def pass3_generate_all(
     llm: LLM,
     tokenizer,
     max_tokens: int,
+    max_model_len: int = 32768,
 ) -> Dict[str, str]:
     """
     Build all 8 diagram prompts, submit as one batch.
     If a diagram fails lightweight validation, retry that diagram once with a repair prompt.
+
+    For models with tight context windows (e.g. Mistral-Large at 32k), the
+    combined prompt (system + registry JSON + RAG examples + code chunks) can
+    exceed the input budget even when GENERATION_CHUNK_BUDGET looks safe in
+    characters.  We therefore measure the *token* overhead for each diagram
+    type's fixed parts (registry + RAG + template boilerplate) and compute a
+    per-diagram code-chunk character budget that guarantees the prompt fits.
     """
+    input_budget = max_model_len - max_tokens   # tokens available for the prompt
+
     dtypes  = [dt for dt, _ in diagram_types]
     prompts: List[str] = []
-    user_msgs: Dict[str, str] = {}
+
     for dtype, desc in diagram_types:
+        rag_examples = rag_by_type.get(dtype, "")
+
+        # ── Step 1: measure fixed overhead (prompt with empty code_chunks) ──
+        user_msg_empty = GENERATION_TMPL.format(
+            dtype_upper=dtype.upper(),
+            repo_name=repo_name,
+            description=desc,
+            syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+            registry_json=json.dumps(registry, indent=2),
+            code_chunks="",
+            rag_examples=rag_examples,
+        )
+        overhead_tokens = _count_tokens(
+            tokenizer, format_prompt(tokenizer, GENERATION_SYSTEM, user_msg_empty)
+        )
+
+        # ── Step 2: derive how many chars we can afford for code_chunks ──
+        remaining_tokens = input_budget - overhead_tokens
+        if remaining_tokens <= 0:
+            # Registry + RAG alone already overflow — skip code chunks entirely
+            print(f"      [WARN] {dtype}: fixed overhead ({overhead_tokens} tok) already "
+                  f"exceeds budget ({input_budget} tok). Omitting code chunks.")
+            code_chunks = ""
+        else:
+            # Empirical ratio: Mistral ≈ 3.2 chars/token for mixed code+prose.
+            # Use 3.0 to stay conservative (under-estimate chars, ensuring fit).
+            char_budget = int(remaining_tokens * 3.0)
+            char_budget = min(char_budget, GENERATION_CHUNK_BUDGET)  # never exceed global cap
+            code_chunks = select_chunks(dtype, files, registry, char_budget)
+
+            # ── Step 3: verify and shrink further if still over ──
+            user_msg = GENERATION_TMPL.format(
+                dtype_upper=dtype.upper(),
+                repo_name=repo_name,
+                description=desc,
+                syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+                registry_json=json.dumps(registry, indent=2),
+                code_chunks=code_chunks,
+                rag_examples=rag_examples,
+            )
+            prompt_candidate = format_prompt(tokenizer, GENERATION_SYSTEM, user_msg)
+            n_tokens = _count_tokens(tokenizer, prompt_candidate)
+
+            shrink = 0
+            while n_tokens > input_budget and char_budget > 500:
+                char_budget = int(char_budget * 0.85)
+                shrink += 1
+                code_chunks = select_chunks(dtype, files, registry, char_budget)
+                user_msg = GENERATION_TMPL.format(
+                    dtype_upper=dtype.upper(),
+                    repo_name=repo_name,
+                    description=desc,
+                    syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
+                    registry_json=json.dumps(registry, indent=2),
+                    code_chunks=code_chunks,
+                    rag_examples=rag_examples,
+                )
+                prompt_candidate = format_prompt(tokenizer, GENERATION_SYSTEM, user_msg)
+                n_tokens = _count_tokens(tokenizer, prompt_candidate)
+
+            if shrink:
+                print(f"      [INFO] {dtype}: shrunk code_chunks {shrink}x "
+                      f"→ {char_budget:,} chars / {n_tokens:,} tokens")
+
         user_msg = GENERATION_TMPL.format(
             dtype_upper=dtype.upper(),
             repo_name=repo_name,
             description=desc,
             syntax_hint=DIAGRAM_SYNTAX_HINTS.get(dtype, ""),
             registry_json=json.dumps(registry, indent=2),
-            code_chunks=select_chunks(dtype, files, registry),
-            rag_examples=rag_by_type.get(dtype, ""),
+            code_chunks=code_chunks,
+            rag_examples=rag_examples,
         )
         prompts.append(format_prompt(tokenizer, GENERATION_SYSTEM, user_msg))
 
@@ -1299,6 +1374,7 @@ def main() -> None:
         llm=llm,
         tokenizer=tokenizer,
         max_tokens=args.max_tokens,
+        max_model_len=args.max_model_len,
     )
 
     print("\n[8] Writing diagram files...")
