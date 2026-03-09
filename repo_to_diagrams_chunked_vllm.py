@@ -43,9 +43,6 @@ import requests
 from sentence_transformers import SentenceTransformer
 from vllm import LLM, SamplingParams
 
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="mistral_common")
-
 # ---------------------------------------------------------------------------
 # Diagram catalogue
 # ---------------------------------------------------------------------------
@@ -72,6 +69,40 @@ GENERATION_CHUNK_BUDGET  = 24_000
 CONTEXT_SAFETY_MARGIN    = 64
 
 # ---------------------------------------------------------------------------
+# Per-model context defaults
+# Matched by substring (case-insensitive) against the --model argument.
+# --max-model-len overrides these when explicitly provided.
+# ---------------------------------------------------------------------------
+MODEL_DEFAULTS: List[Tuple[str, int]] = [
+    # Llama 4 (MoE — low KV-cache cost, full 128k safe on 4×A100)
+    ("llama-4",          128_000),
+    # Llama 3.x (dense — 128k supported, KV cache is heavier)
+    ("llama-3",          128_000),
+    # Mistral Large 2411 (123B dense — KV cache expensive, 48k is safe on 4×A100 80GB)
+    ("mistral-large",     48_000),
+    # Mistral Small / Nemo (smaller dense models)
+    ("mistral",           32_000),
+    # Qwen 2.5 / 3 (128k native)
+    ("qwen",             128_000),
+    # DeepSeek (128k native)
+    ("deepseek",         128_000),
+    # gpt-oss-120b (128k native)
+    ("gpt-oss-120b",         128_000),
+]
+DEFAULT_MAX_MODEL_LEN = 32_000   # safe fallback for unknown models
+
+
+def resolve_max_model_len(model_name: str, override: Optional[int]) -> int:
+    """Return effective max_model_len: explicit override > model table > fallback."""
+    if override is not None:
+        return override
+    lower = model_name.lower()
+    for pattern, length in MODEL_DEFAULTS:
+        if pattern in lower:
+            return length
+    return DEFAULT_MAX_MODEL_LEN
+
+# ---------------------------------------------------------------------------
 # Per-diagram syntax rules injected into every generation prompt
 # ---------------------------------------------------------------------------
 DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
@@ -82,7 +113,15 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "  if (condition?) then (yes) / else (no) / endif\n"
         "  fork / fork again / end fork\n"
         "  while (condition?) / endwhile\n"
-        "NEVER use (*) --> or --> (*) legacy syntax."
+        "NEVER use (*) --> or --> (*) legacy syntax.\n"
+        "BLOCK MATCHING (every opener needs exactly one closer):\n"
+        "  if → endif\n"
+        "  fork → end fork  (use 'fork again' for parallel branches, then 'end fork')\n"
+        "  while → endwhile\n"
+        "  repeat → repeat while\n"
+        "NEVER write endwhile unless there is a matching while above it.\n"
+        "NEVER write endif unless there is a matching if above it.\n"
+        "A fork block ends with 'end fork', not 'endwhile' or 'end'."
     ),
     "state": (
         "Correct transition syntax: StateName --> OtherState : label\n"
@@ -91,9 +130,20 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Entry/exit use [*]."
     ),
     "usecase": (
+        "ALLOWED elements: actor, usecase, rectangle, package, note.\n"
+        "NEVER use: participant, node, cloud, component, queue, artifact.\n"
         'Rectangle names with spaces MUST be quoted: rectangle "My Service" { }\n'
         'Actor names with spaces must be quoted: actor "End User" as u\n'
-        'Use case names with spaces must be quoted: usecase "Do Something" as UC1'
+        'Use case names with spaces must be quoted: usecase "Do Something" as UC1\n'
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  usecase \"Do Something\" as \"Do Something\"\n"
+        "  CORRECT: usecase \"Do Something\" as do_something\n"
+        "If a rectangle or package is referenced in edges, it MUST have an alias:\n"
+        "  WRONG:  rectangle \"Imagery Pipeline\" { }  ...then later...  foo --> imagery_pipeline\n"
+        "  CORRECT: rectangle \"Imagery Pipeline\" as imagery_pipeline { }\n"
+        "Never reference an alias in an edge that was not explicitly declared with 'as'.\n"
+        "BRACE DISCIPLINE: every { must have exactly one matching }.\n"
+        "Write ALL declarations and close ALL { } blocks BEFORE writing any edges."
     ),
     "class": (
         "STRICT CLASS-ONLY OUTPUT (no mixing):\n"
@@ -121,61 +171,76 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Members: + public, - private, # protected\n"
         "Hard constraints:\n"
         "- Do not mix other diagram element families here (no component/queue/node/participant/object).\n"
-        "- Relationship arrows go on their OWN lines, never on a class declaration line."
+        "- Relationship arrows go on their OWN lines, never on a class declaration line.\n"
+        "- Every { must have exactly one matching }. Never emit an orphaned closing }."
     ),
     "sequence": (
+        "ALLOWED elements: participant, actor, boundary, control, entity, database, collections.\n"
+        "NEVER use: node, component, queue, cloud, artifact, rectangle, object, class.\n"
         "Declare all participants at the top before any arrows.\n"
         'participant "Name" as alias\n'
         "Sync call: A -> B : message\n"
         "Return:    B --> A : response\n"
         "activate B / deactivate B\n"
         "Groups: alt/else/end, loop, opt\n"
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  participant \"My Server\" as \"My Server\"\n"
+        "  CORRECT: participant \"My Server\" as my_server\n"
+        "File paths: replace / with _ in display names:\n"
+        "  WRONG:  participant \"ui/server.py\"\n"
+        "  CORRECT: participant \"ui_server.py\" as server\n"
         "Hard constraints:\n"
         "- Every participant referenced in a message must be declared before messages.\n"
         "- If a participant name contains spaces, quote it and/or use an alias; message endpoints should be aliases."
     ),
     "component": (
-        'Components/packages/frames with spaces must be quoted.\n'
-        'component "My Component" as alias\n'
-        'interface "My API" as api\n'
-        'queue "message_queue" as mq\n'
-        "\n"
+        "ALLOWED elements: component, interface, queue, database, cloud, artifact, node, package, rectangle.\n"
+        "NEVER use: participant, boundary, control, entity, collections.\n"
+        'Components/packages/frames with spaces must be quoted: component "My Component" as my_component\n'
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  component \"MQTT Listener\" as \"MQTT Listener\"\n"
+        "  CORRECT: component \"MQTT Listener\" as mqtt_listener\n"
+        "Every alias must be unique within the diagram.\n"
+        "Edge labels must have text, or omit the colon entirely:\n"
+        "  WRONG:  A --> B :\n"
+        "  CORRECT: A --> B : publishes  OR  A --> B\n"
         "Declare ALL elements before edges.\n"
-        "Edges must use --> or ..> only.\n"
-        "Never use .>.\n"
+        "Edges must use --> or ..> only. Never use .>.\n"
         "Never create new keywords like exchange or topic.\n"
         "Represent messaging exchanges as stereotypes:\n"
         'queue "celebrity_names" <<exchange>>\n'
-        "Links: A --> B, A ..> B (dependency)\n"
-        "Hard constraints (avoid common syntax traps):\n"
-        "- Do NOT define/alias an element inline inside a link line. (INVALID: `A --> \"Thing\" as T`). Declare first, then connect.\n"
-        "- One edge per line. Do NOT use comma-separated targets. (INVALID: `A --> B, C`).\n"
-        "- Do not mix other diagram element families (e.g., class/object/participant) in a component diagram."
-        "\n"
-        "Do NOT declare elements inline on edges (e.g. A --> interface \"X\" as x). Declare first, then connect."
+        "Hard constraints:\n"
+        "- Do NOT define/alias an element inline inside a link line.\n"
+        "- One edge per line. Do NOT use comma-separated targets.\n"
+        "- Do not mix other diagram element families (e.g., class/object/participant)."
     ),
     "deployment": (
+        "ALLOWED elements: node, component, artifact, database, cloud, queue, package.\n"
+        "NEVER use: participant, boundary, control, entity, collections, actor.\n"
         'Nodes/clouds/frames with spaces must be quoted: node "My Node" { }\n'
-        'cloud "AWS" { }\n'
-        'frame "VPC" { }\n'
-        "Artifacts: artifact \"app.jar\"\n"
-        "Links: A --> B : label\n"
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  node \"MongoDB Cluster\" as \"Mongo Cluster\"\n"
+        "  CORRECT: node \"MongoDB Cluster\" as Mongo_Cluster\n"
+        "Write ALL node/component declarations and close ALL { } blocks BEFORE writing edges.\n"
         "Hard constraints:\n"
-        "- There is no `exchange` keyword. If you need to model a RabbitMQ exchange/topic, represent it as an `artifact` or `component`\n"
-        "  with a descriptive label (e.g., `artifact \"exchange: celebrity_names\" as EX`).\n"
+        "- There is no `exchange` keyword. Represent exchanges as artifact or component with label.\n"
         "- Do NOT define/alias an element inline inside a link line. Declare first, then connect.\n"
         "- One edge per line. Do NOT use comma-separated targets."
     ),
     "object": (
-        "Object diagrams should only use `object` declarations and links between objects.\n"
-        'object "name:Type" as o1\n'
-        "Links: o1 -- o2\n"
-        "Hard constraints:\n"
-        "- Do not include queue/component/class/node/participant elements.\n"
-        "- If mixing is unavoidable, add `allowmixing`, but prefer separate diagrams."
+        "ALLOWED elements: object, note.\n"
+        "NEVER use: class, component, participant, node, queue, cloud.\n"
         'Object instances: object "instanceName : ClassName" as alias\n'
         "Field values: alias : field = value\n"
-        "Links same as class diagram."
+        "DECLARATION ORDER (critical — PlantUML errors if violated):\n"
+        "  1. ALL  object \"Name\" as alias  declarations\n"
+        "  2. ALL  alias : field = value  field assignments\n"
+        "  3. ALL edges\n"
+        "Never reference an alias in an edge before its object declaration.\n"
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  object \"config:ConfigParser\" as \"config\"\n"
+        "  CORRECT: object \"config:ConfigParser\" as config\n"
+        "Links: o1 --> o2 : label  or  o1 *-- o2"
     ),
 }
 
@@ -621,35 +686,54 @@ GENERATION_SYSTEM = (
     "Generate strictly valid PlantUML 1.2025.10 diagrams. "
     "Use ONLY canonical names from the Entity Registry — never invent new names. "
     "Output ONLY the @startuml...@enduml block.\n\n"
+
     "STRICT PLANTUML 1.2025.10 SYNTAX RULES:\n"
     "- Activity: modern syntax only (start/stop/:action;/fork). NEVER (*) -->.\n"
     "- State: transitions use '--> State : label'. NEVER -->|label|.\n"
     "- Use case/component/deployment: ALL multi-word names must be double-quoted.\n"
     "- Class: <|-- inherit, *-- compose, o-- aggregate, --> associate.\n"
-    "- Sequence: declare all participants before first arrow."
-    "PLANTUML VALIDATION CONTRACT:\n"
-    "- Never output PlantUML error text.\n"
-    "- Never reference undeclared elements/aliases.\n"
-    "- Every element must be declared before it is used in an edge.\n"
-    "- Do NOT declare elements inline on edges.\n"
-    "- Forbidden legacy/mistyped tokens: 'exchange' keyword, '.>' arrows, '->>' arrows.\n\n"
+    "- Sequence: declare all participants before first arrow.\n\n"
 
-    "ALLOWED KEYWORDS (global):\n"
-    "- component, interface, database, cloud, node, artifact, actor, package, rectangle, frame, queue,\n"
-    "  participant, object, class, enum, note, skinparam, title, legend, left to right direction.\n"
-    "- Forbidden keywords: exchange, topic, fanout, pubsub, service, lambda.\n"
-    "- If you need an exchange/topic concept, represent it as a queue with a stereotype:\n"
-    "  queue \"X\" <<exchange>>\n\n"
+    "ALIAS RULES (critical):\n"
+    "- Aliases must be plain identifiers: letters, digits, underscores ONLY.\n"
+    "- NEVER quote an alias: WRONG: as \"Mongo Cluster\"  CORRECT: as Mongo_Cluster\n"
+    "- Every alias must be unique within the diagram — never assign the same alias twice.\n"
+    "- After declaring  component \"Foo\" as foo  always refer to the element as  foo  not  \"Foo\".\n\n"
+
+    "DECLARATION ORDER (critical):\n"
+    "- Declare ALL elements first, then write ALL edges. Never interleave.\n"
+    "- An element used in an edge must have an explicit declaration above that edge.\n"
+    "- For object diagrams: declare all objects, then field assignments, then edges.\n\n"
+
+    "BRACE DISCIPLINE:\n"
+    "- Every  {  must have exactly one matching  }.\n"
+    "- Never emit a bare  }  that has no matching opener.\n"
+    "- Group blocks (node/package/rectangle) must be fully closed before writing edges.\n\n"
 
     "EDGE RULES:\n"
-    "- Allowed arrows: -->, <--> , ..> , <.. , ..|> , <|-- , *-- , o--.\n"
+    "- Allowed arrows: -->, <-->, ..>, <.., ..|>, <|--, *--, o--.\n"
     "- NEVER use .> or ->> or =>.\n"
     "- Never declare new elements inline on an edge.\n"
-    "- All elements must be declared first, then edges listed afterward.\n\n"
+    "- Edge labels MUST have text: WRONG: A --> B :   CORRECT: A --> B : calls  or just  A --> B\n\n"
 
-    "QUOTING RULES:\n"
-    "- Names containing spaces MUST be quoted.\n"
-    "- Aliases must be used consistently after declaration.\n\n"
+    "ELEMENT TYPES PER DIAGRAM (do not mix):\n"
+    "- sequence:   participant, actor, boundary, control, entity, database, collections\n"
+    "- component:  component, interface, queue, database, cloud, artifact, node, package, rectangle\n"
+    "- deployment: node, component, artifact, database, cloud, queue, package\n"
+    "- class:      class, abstract class, interface, enum, package, namespace\n"
+    "- object:     object, note\n"
+    "- usecase:    actor, usecase, rectangle, package, note\n"
+    "- NEVER use 'participant' outside sequence diagrams.\n"
+    "- NEVER use 'node' or 'cloud' inside class or sequence diagrams.\n\n"
+
+    "ALLOWED KEYWORDS (global):\n"
+    "- Forbidden keywords: exchange, topic, fanout, pubsub, service, lambda.\n"
+    "- Represent exchange/topic concepts as:  queue \"X\" <<exchange>>\n\n"
+
+    "NAME SANITISATION:\n"
+    "- File paths and names containing  /  must be replaced with  _  before use.\n"
+    "- CORRECT: participant \"ui_server.py\" as server\n"
+    "- WRONG:   participant \"ui/server.py\" as server\n\n"
 
     "If any generated line violates these rules, rewrite it before output."
 )
@@ -1034,6 +1118,434 @@ def repair_slash_names(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_unbalanced_class_braces(puml: str) -> str:
+    """
+    Remove extra closing braces in class diagrams that cause PlantUML to throw
+    java.lang.IllegalStateException (Assumed diagram type: class).
+
+    The LLM sometimes emits double `}` after a class body:
+        class Foo {
+        }
+        }       ← orphaned extra brace
+
+    Strategy: walk the lines tracking brace depth.  Any `}` that would push
+    depth below zero (i.e. it has no matching opener) is dropped.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    depth = 0
+    out: List[str] = []
+    for ln in puml.splitlines():
+        stripped = ln.strip()
+        opens  = stripped.count("{")
+        closes = stripped.count("}")
+        net    = opens - closes
+
+        if net < 0 and depth + net < 0:
+            # This line has more closes than the current depth allows — drop orphans
+            to_drop = -(depth + net)
+            fixed = ln
+            for _ in range(to_drop):
+                # Remove the last unmatched `}` from the line
+                idx = fixed.rfind("}")
+                if idx != -1:
+                    fixed = fixed[:idx] + fixed[idx+1:]
+            fixed = fixed.rstrip()
+            if fixed != ln.rstrip():
+                print(f"      [REPAIR] Removed {to_drop} unbalanced '}}' from: {ln.strip()!r}")
+            if fixed.strip():
+                out.append(fixed)
+            depth = max(0, depth + net + to_drop)
+        else:
+            out.append(ln)
+            depth = max(0, depth + net)
+
+    return "\n".join(out)
+
+
+# Element keywords that are only valid in specific diagram families.
+# Maps diagram_type → set of line-start keywords that should NOT appear there.
+_WRONG_ELEMENT_RE: Dict[str, re.Pattern] = {
+    "deployment": re.compile(
+        r"^\s*(participant|actor\b|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+    "component": re.compile(
+        r"^\s*(participant|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+    "class": re.compile(
+        r"^\s*(participant|node|cloud|queue\b|artifact|rectangle\b|frame\b|actor\b|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+    "object": re.compile(
+        r"^\s*(participant|node|cloud|queue\b|artifact|rectangle\b|frame\b|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+    "usecase": re.compile(
+        r"^\s*(participant|node|cloud|queue\b|artifact|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def repair_wrong_element_types(puml: str, diagram_type: str) -> str:
+    """
+    Strip lines that use element keywords illegal for this diagram type.
+
+    Example: a deployment diagram containing `participant "MqttListener" ...`
+    will fail with 'Syntax Error? (Assumed diagram type: component)'.
+    Dropping the offending line is safer than a retry.
+    """
+    rx = _WRONG_ELEMENT_RE.get(diagram_type)
+    if rx is None or "@startuml" not in puml:
+        return puml
+
+    out: List[str] = []
+    for ln in puml.splitlines():
+        if rx.match(ln):
+            print(f"      [REPAIR] Removed wrong-type element from {diagram_type}: {ln.strip()!r}")
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def repair_slash_in_quoted_name(puml: str) -> str:
+    """
+    Fix broken quoting caused by slashes inside participant/actor display names.
+
+    The LLM (or repair_slash_names) sometimes produces:
+        participant "imagery-"ui/server".py" as Server
+    where the slash caused inner quoting that breaks the outer string.
+
+    Two patterns fixed:
+    1. Inner quotes around a slash-containing token inside a larger quoted string:
+           "text-"word/word"suffix"  →  "text-word_word-suffix"
+    2. A bare slash remaining inside an already-quoted name:
+           "some/path.py"            →  "some_path.py"
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Pattern 1: "outer-"inner/word"rest" — inner pair of quotes inside outer quotes
+    _INNER_QUOTED_SLASH = re.compile(r'"([^"]*)"([\w./]+/[\w./]+)"([^"]*)"')
+
+    # Pattern 2: slash remaining inside a quoted string
+    _SLASH_INSIDE_QUOTE = re.compile(r'"([^"]*)/([^"]*)"')
+
+    out: List[str] = []
+    for ln in puml.splitlines():
+        s = ln.strip()
+        # Only process participant/actor declaration lines
+        if not re.match(r'^\s*(participant|actor)\b', s, re.IGNORECASE):
+            out.append(ln)
+            continue
+
+        original = ln
+        # Fix pattern 1: collapse inner quotes + slash into clean token
+        ln = _INNER_QUOTED_SLASH.sub(
+            lambda m: f'"{m.group(1)}{m.group(2).replace("/", "_")}{m.group(3)}"', ln
+        )
+        # Fix pattern 2: replace slash inside quotes with underscore
+        ln = _SLASH_INSIDE_QUOTE.sub(
+            lambda m: f'"{m.group(1)}_{m.group(2)}"', ln
+        )
+        if ln != original:
+            print(f"      [REPAIR] Fixed slash in quoted name: {original.strip()!r} → {ln.strip()!r}")
+        out.append(ln)
+
+    return "\n".join(out)
+
+
+def repair_trailing_edge_colon(puml: str) -> str:
+    """
+    Remove a trailing bare ':' on edge lines that has no label text following it.
+
+    Example:
+        rekognition --> mqtt_listener :    ← syntax error
+        rekognition --> mqtt_listener      ← fixed
+
+    PlantUML treats ' :' as the start of a label; if nothing follows it gets
+    confused and sometimes misidentifies the diagram type.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    _EDGE_BARE_COLON = re.compile(
+        r'^(\s*.*(?:-->|<--|<-->|\.\.>|<\.\.|--|\.\.).*?)\s*:\s*$'
+    )
+    out = []
+    for ln in puml.splitlines():
+        m = _EDGE_BARE_COLON.match(ln)
+        if m:
+            fixed = m.group(1)
+            print(f"      [REPAIR] Removed trailing bare colon from edge: {ln.strip()!r}")
+            out.append(fixed)
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def repair_quoted_aliases(puml: str) -> str:
+    """
+    Fix `as "Multi Word Alias"` → `as Multi_Word_Alias`.
+
+    PlantUML requires aliases to be plain identifiers (no spaces, no quotes).
+    The LLM frequently writes:
+        node "MongoDB Cluster" as "Mongo Cluster" {
+    which causes a syntax error.  We slugify the quoted alias and rewrite all
+    downstream references to the old quoted form.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Match:  ... as "Some Name"  (optionally followed by { or end of line)
+    _QUOTED_AS = re.compile(r'\bas\s+"([^"]+)"', re.IGNORECASE)
+
+    lines = puml.splitlines()
+    # First pass: collect all quoted→slug replacements
+    replacements: Dict[str, str] = {}   # "Mongo Cluster" → Mongo_Cluster
+    for ln in lines:
+        for m in _QUOTED_AS.finditer(ln):
+            quoted = m.group(1)
+            if quoted not in replacements:
+                slug = re.sub(r'\W+', '_', quoted).strip('_')
+                replacements[quoted] = slug
+
+    if not replacements:
+        return puml
+
+    # Second pass: rewrite declarations and all references
+    out = []
+    for ln in lines:
+        original = ln
+        # Replace  as "Quoted Name"  →  as Slug
+        for quoted, slug in replacements.items():
+            ln = re.sub(
+                r'\bas\s+"' + re.escape(quoted) + r'"',
+                f'as {slug}',
+                ln, flags=re.IGNORECASE,
+            )
+            # Also replace bare "Quoted Name" used as a reference on edge lines
+            # (only on non-declaration lines to avoid double-processing)
+            ln = re.sub(r'"' + re.escape(quoted) + r'"', slug, ln)
+        if ln != original:
+            print(f"      [REPAIR] Slugified quoted alias: {original.strip()!r} → {ln.strip()!r}")
+        out.append(ln)
+    return "\n".join(out)
+
+
+def repair_forward_referenced_objects(puml: str) -> str:
+    """
+    Fix 'Object already exists' errors in object diagrams.
+
+    When edges reference an alias before its `object "..." as alias` declaration,
+    PlantUML implicitly creates a bare element for that alias.  The explicit
+    declaration later then collides.
+
+    Fix: move all `object "..." as alias` declarations to the top of the diagram
+    body (just after @startuml), before any edges or field assignments.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    _OBJ_DECL = re.compile(r'^\s*object\s+', re.IGNORECASE)
+    _EDGE_OR_FIELD = re.compile(
+        r'(-->|<--|<-->|\.\.>|<\.\.|--|\.\.|^\s*\w+\s*:\s*\w+\s*=)',
+    )
+
+    lines = puml.splitlines()
+    header = []
+    decls = []
+    body = []
+
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith('@startuml') or s.startswith('@enduml') or not s:
+            header.append(ln) if s.startswith('@startuml') or not s and not body else body.append(ln)
+            if s.startswith('@enduml'):
+                body.append(ln)
+            elif s.startswith('@startuml'):
+                pass  # already added
+        elif _OBJ_DECL.match(ln):
+            decls.append(ln)
+        else:
+            body.append(ln)
+
+    if not decls:
+        return puml
+
+    # Rebuild: @startuml, object declarations, then rest
+    startuml_line = next((ln for ln in lines if ln.strip().startswith('@startuml')), '@startuml')
+    enduml_line   = next((ln for ln in lines if ln.strip() == '@enduml'), '@enduml')
+    inner = [ln for ln in lines
+             if not ln.strip().startswith('@startuml')
+             and ln.strip() != '@enduml'
+             and not _OBJ_DECL.match(ln)]
+
+    result = [startuml_line] + decls + inner + [enduml_line]
+    rebuilt = "\n".join(result)
+    if rebuilt != puml:
+        print(f"      [REPAIR] Moved {len(decls)} object declaration(s) before edges.")
+    return rebuilt
+
+
+def repair_stray_closing_braces(puml: str, diagram_type: str) -> str:
+    """
+    Remove `}` lines that have no matching opener in the diagram body.
+
+    This catches the pattern seen in usecase diagrams where the LLM emits a
+    stray `}` (likely meant to close a `rectangle` block it forgot to open),
+    which breaks PlantUML's group context and causes a java.lang.IllegalStateException
+    when subsequent edges try to add elements outside any valid group.
+
+    Only applied to diagram types where bare group context errors occur:
+    usecase, component, deployment.
+    """
+    if diagram_type not in ("usecase", "component", "deployment", "sequence"):
+        return puml
+    if "@startuml" not in puml:
+        return puml
+
+    depth = 0
+    out = []
+    for ln in puml.splitlines():
+        s = ln.strip()
+        # Track openers (lines ending with { or being pure {)
+        opens  = s.count('{')
+        closes = s.count('}')
+        if closes > opens and depth + (opens - closes) < 0:
+            to_drop = closes - opens - depth
+            fixed = ln
+            for _ in range(to_drop):
+                idx = fixed.rfind('}')
+                if idx != -1:
+                    fixed = fixed[:idx] + fixed[idx+1:]
+            fixed = fixed.rstrip()
+            if fixed != ln.rstrip():
+                print(f"      [REPAIR] Removed {to_drop} stray '}}' in {diagram_type}: {ln.strip()!r}")
+            if fixed.strip():
+                out.append(fixed)
+            depth = max(0, depth + opens - closes + to_drop)
+        else:
+            out.append(ln)
+            depth = max(0, depth + opens - closes)
+
+    return "\n".join(out)
+
+
+def repair_orphan_activity_keywords(puml: str) -> str:
+    """
+    Remove activity control keywords that have no matching opener.
+
+    Patterns caught:
+    - `endwhile` with no preceding `while`
+    - `end fork` / `fork again` with no preceding `fork`
+    - `endif` with no preceding `if`
+    - `end` with no preceding `repeat` or `while`
+
+    Strategy: single forward pass tracking open counts for each block type.
+    Any closer that would push its counter below zero is dropped.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # (opener_pattern, closer_pattern)
+    _BLOCKS = [
+        (re.compile(r'^\s*while\b',      re.IGNORECASE),
+         re.compile(r'^\s*endwhile\b',   re.IGNORECASE)),
+        (re.compile(r'^\s*fork\b',       re.IGNORECASE),
+         re.compile(r'^\s*(end\s+fork|fork\s+again)\b', re.IGNORECASE)),
+        (re.compile(r'^\s*if\b',         re.IGNORECASE),
+         re.compile(r'^\s*endif\b',      re.IGNORECASE)),
+        (re.compile(r'^\s*repeat\b',     re.IGNORECASE),
+         re.compile(r'^\s*repeat\s+while\b', re.IGNORECASE)),
+    ]
+
+    counters = [0] * len(_BLOCKS)
+    out = []
+    for ln in puml.splitlines():
+        drop = False
+        for i, (opener, closer) in enumerate(_BLOCKS):
+            if opener.match(ln):
+                counters[i] += 1
+            elif closer.match(ln):
+                if counters[i] <= 0:
+                    print(f"      [REPAIR] Removed orphan activity keyword: {ln.strip()!r}")
+                    drop = True
+                    break
+                else:
+                    counters[i] -= 1
+        if not drop:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def repair_undeclared_alias_edges(puml: str, diagram_type: str) -> str:
+    """
+    Remove edge lines that reference an alias which was never declared.
+
+    Root cause: the LLM declares  rectangle "Imagery Pipeline" { }  with no
+    `as alias` clause, then later writes edges like:
+        view_imagery --> imagery_pipeline : uses
+    PlantUML implicitly creates `imagery_pipeline` as an unknown type, which
+    causes diagram-type detection to misfire (often 'Assumed type: component').
+
+    Strategy:
+    1. Collect all declared aliases (from `as <alias>` clauses).
+    2. Collect all bare identifiers used on edge lines.
+    3. Drop edge lines where BOTH endpoints are unknown (fully undeclared edges).
+       Edges where at least one end is a known alias are kept.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    _AS_DECL   = re.compile(r'\bas\s+(\w+)', re.IGNORECASE)
+    _EDGE_LINE = re.compile(
+        r'(-->|<--|<-->|\.\.>|<\.\.|--|\.\.|<\|--|--\|>|\*--|o--)',
+        re.IGNORECASE,
+    )
+    # Split an edge line into LHS and RHS around the arrow
+    _EDGE_SPLIT = re.compile(
+        r'^(\s*)([\w"]+(?:\s+[\w"]+)*?)\s*'
+        r'(-->|<--|<-->|\.\.>|<\.\.|--|\.\.)'
+        r'\s*([\w"]+(?:\s+[\w"]+)*?)(\s*:.*)?$',
+        re.IGNORECASE,
+    )
+
+    lines = puml.splitlines()
+
+    # Pass 1: collect declared aliases and bare-word element names
+    declared: set = set()
+    for ln in lines:
+        for m in _AS_DECL.finditer(ln):
+            declared.add(m.group(1))
+
+    if not declared:
+        return puml  # nothing to cross-reference against
+
+    # Pass 2: drop edges where both sides are undeclared bare identifiers
+    out = []
+    for ln in lines:
+        if not _EDGE_LINE.search(ln) or ln.strip().startswith("'"):
+            out.append(ln)
+            continue
+        m = _EDGE_SPLIT.match(ln)
+        if not m:
+            out.append(ln)
+            continue
+        lhs = m.group(2).strip().strip('"')
+        rhs = m.group(4).strip().strip('"')
+        # Keep if at least one side is a known declared alias
+        if lhs in declared or rhs in declared:
+            out.append(ln)
+        else:
+            print(f"      [REPAIR] Removed edge with undeclared aliases ({lhs!r}, {rhs!r}): {ln.strip()!r}")
+
+    return "\n".join(out)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -1386,12 +1898,22 @@ def pass3_generate_all(
         puml = extract_start_end_block(raw)
         # Auto-repair common structural mistakes before validation
         puml = repair_duplicate_aliases(puml)
+        puml = repair_quoted_aliases(puml)
         puml = repair_unquoted_multiword_edges(puml)
         puml = repair_slash_names(puml)
+        puml = repair_slash_in_quoted_name(puml)
+        puml = repair_wrong_element_types(puml, dtype)
+        puml = repair_trailing_edge_colon(puml)
+        puml = repair_stray_closing_braces(puml, dtype)
+        puml = repair_undeclared_alias_edges(puml, dtype)
         if dtype == "activity":
+            puml = repair_orphan_activity_keywords(puml)
             puml = repair_truncated_activity(puml)
         if dtype == "class":
             puml = repair_class_diagram_lines(puml)
+            puml = repair_unbalanced_class_braces(puml)
+        if dtype == "object":
+            puml = repair_forward_referenced_objects(puml)
         results[dtype] = puml
 
     # One retry per failing diagram type (only for the known failure patterns)
@@ -1416,12 +1938,22 @@ def pass3_generate_all(
         for dtype, raw in zip(retry_types, retry_raw):
             repaired = extract_start_end_block(raw)
             repaired = repair_duplicate_aliases(repaired)
+            repaired = repair_quoted_aliases(repaired)
             repaired = repair_unquoted_multiword_edges(repaired)
             repaired = repair_slash_names(repaired)
+            repaired = repair_slash_in_quoted_name(repaired)
+            repaired = repair_wrong_element_types(repaired, dtype)
+            repaired = repair_trailing_edge_colon(repaired)
+            repaired = repair_stray_closing_braces(repaired, dtype)
+            repaired = repair_undeclared_alias_edges(repaired, dtype)
             if dtype == "activity":
+                repaired = repair_orphan_activity_keywords(repaired)
                 repaired = repair_truncated_activity(repaired)
             if dtype == "class":
                 repaired = repair_class_diagram_lines(repaired)
+                repaired = repair_unbalanced_class_braces(repaired)
+            if dtype == "object":
+                repaired = repair_forward_referenced_objects(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
             errs = validate_puml(dtype, repaired)
             if errs:
@@ -1449,8 +1981,10 @@ def main() -> None:
                         default=os.environ.get("VLLM_MODEL", "meta-llama/Llama-4-Scout-17B-16E-Instruct"))
     parser.add_argument("--tp",    type=int,
                         default=int(os.environ.get("VLLM_TP",   "4")))
+    _env_len = os.environ.get("VLLM_MAX_LEN")
     parser.add_argument("--max-model-len", type=int,
-                        default=int(os.environ.get("VLLM_MAX_LEN",    "32000")))
+                        default=int(_env_len) if _env_len else None,
+                        help="Override context length. Auto-detected from model name if omitted.")
     parser.add_argument("--max-tokens",    type=int,
                         default=int(os.environ.get("VLLM_MAX_TOKENS",  "2048")))
     parser.add_argument("--extract-tokens", type=int,
@@ -1468,6 +2002,14 @@ def main() -> None:
     parser.add_argument("--registry-file",
                         help="Load existing registry JSON — skips Pass 1 and Pass 2.")
     args = parser.parse_args()
+
+    # Resolve effective context length (override > model table > fallback)
+    _override = args.max_model_len  # None if not supplied
+    args.max_model_len = resolve_max_model_len(args.model, _override)
+    if _override is None:
+        print(f"[INFO] Auto-detected max_model_len={args.max_model_len:,} for model '{args.model}'")
+    else:
+        print(f"[INFO] Using --max-model-len={args.max_model_len:,} (override)")
 
     repo_root  = os.path.abspath(args.input)
     output_dir = os.path.abspath(args.output)
