@@ -78,7 +78,9 @@ MODEL_DEFAULTS: List[Tuple[str, int]] = [
     ("llama-4",          128_000),
     # Llama 3.x (dense — 128k supported, KV cache is heavier)
     ("llama-3",          128_000),
-    # Mistral Large 2411 (123B dense — KV cache expensive, 48k is safe on 4×A100 80GB)
+    # Mistral Large 3 675B (quantized, 8-GPU — supports 256k)
+    ("mistral-large-3",  262_144),
+    # Mistral Large 2411 123B (dense — KV cache expensive, 48k safe on 4×A100 80GB)
     ("mistral-large",     48_000),
     # Mistral Small / Nemo (smaller dense models)
     ("mistral",           32_000),
@@ -340,7 +342,10 @@ def lint_plantuml(diagram_type: str, puml: str) -> List[str]:
 # ===========================================================================
 
 def load_model(model: str, tp: int, max_model_len: int,
-               gpu_memory_utilization: float, enforce_eager: bool) -> LLM:
+               gpu_memory_utilization: float, enforce_eager: bool,
+               tokenizer_mode: str = "auto",
+               config_format: str = "auto",
+               load_format: str = "auto") -> LLM:
     """Load the vLLM model once. Pass the returned object to all generate calls."""
     return LLM(
         model=model,
@@ -349,6 +354,9 @@ def load_model(model: str, tp: int, max_model_len: int,
         gpu_memory_utilization=gpu_memory_utilization,
         trust_remote_code=True,
         enforce_eager=enforce_eager,
+        tokenizer_mode=tokenizer_mode,
+        config_format=config_format,
+        load_format=load_format,
     )
 
 
@@ -1997,6 +2005,12 @@ def main() -> None:
                         default=float(os.environ.get("VLLM_TEMPERATURE", "0.0")))
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument("--tokenizer-mode", default="auto",
+                        help="vLLM tokenizer mode. Use 'mistral' for Mistral models (default: auto).")
+    parser.add_argument("--config-format", default="auto",
+                        help="vLLM config format. Use 'mistral' for Mistral models (default: auto).")
+    parser.add_argument("--load-format", default="auto",
+                        help="vLLM load format. Use 'mistral' for Mistral quantized weights (default: auto).")
     parser.add_argument("--rag-k",  type=int,
                         default=int(os.environ.get("RAG_TOP_K", "5")))
     parser.add_argument("--registry-file",
@@ -2054,16 +2068,25 @@ def main() -> None:
     # ------------------------------------------------------------------
     print(f"\n[4] Loading vLLM model (once — used for all passes)...")
     print(f"    {args.model}  |  tp={args.tp}  |  max_len={args.max_model_len}")
+    if args.tokenizer_mode != "auto" or args.load_format != "auto":
+        print(f"    tokenizer_mode={args.tokenizer_mode}  config_format={args.config_format}  load_format={args.load_format}")
     llm = load_model(
         model=args.model,
         tp=args.tp,
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
         enforce_eager=args.enforce_eager,
+        tokenizer_mode=args.tokenizer_mode,
+        config_format=args.config_format,
+        load_format=args.load_format,
     )
     # Grab tokenizer for chat template formatting
     from vllm.transformers_utils.tokenizer import get_tokenizer
-    tokenizer = get_tokenizer(args.model, trust_remote_code=True)
+    tokenizer = get_tokenizer(
+        args.model,
+        trust_remote_code=True,
+        tokenizer_mode=args.tokenizer_mode,
+    )
     print("    ✓ Model loaded and ready")
 
     # ------------------------------------------------------------------
