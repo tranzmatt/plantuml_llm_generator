@@ -111,7 +111,15 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "  if (condition?) then (yes) / else (no) / endif\n"
         "  fork / fork again / end fork\n"
         "  while (condition?) / endwhile\n"
-        "NEVER use (*) --> or --> (*) legacy syntax."
+        "NEVER use (*) --> or --> (*) legacy syntax.\n"
+        "BLOCK MATCHING (every opener needs exactly one closer):\n"
+        "  if → endif\n"
+        "  fork → end fork  (use 'fork again' for parallel branches, then 'end fork')\n"
+        "  while → endwhile\n"
+        "  repeat → repeat while\n"
+        "NEVER write endwhile unless there is a matching while above it.\n"
+        "NEVER write endif unless there is a matching if above it.\n"
+        "A fork block ends with 'end fork', not 'endwhile' or 'end'."
     ),
     "state": (
         "Correct transition syntax: StateName --> OtherState : label\n"
@@ -128,6 +136,10 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Aliases must be plain identifiers — NEVER quote an alias:\n"
         "  WRONG:  usecase \"Do Something\" as \"Do Something\"\n"
         "  CORRECT: usecase \"Do Something\" as do_something\n"
+        "If a rectangle or package is referenced in edges, it MUST have an alias:\n"
+        "  WRONG:  rectangle \"Imagery Pipeline\" { }  ...then later...  foo --> imagery_pipeline\n"
+        "  CORRECT: rectangle \"Imagery Pipeline\" as imagery_pipeline { }\n"
+        "Never reference an alias in an edge that was not explicitly declared with 'as'.\n"
         "BRACE DISCIPLINE: every { must have exactly one matching }.\n"
         "Write ALL declarations and close ALL { } blocks BEFORE writing any edges."
     ),
@@ -1421,6 +1433,117 @@ def repair_stray_closing_braces(puml: str, diagram_type: str) -> str:
     return "\n".join(out)
 
 
+def repair_orphan_activity_keywords(puml: str) -> str:
+    """
+    Remove activity control keywords that have no matching opener.
+
+    Patterns caught:
+    - `endwhile` with no preceding `while`
+    - `end fork` / `fork again` with no preceding `fork`
+    - `endif` with no preceding `if`
+    - `end` with no preceding `repeat` or `while`
+
+    Strategy: single forward pass tracking open counts for each block type.
+    Any closer that would push its counter below zero is dropped.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # (opener_pattern, closer_pattern)
+    _BLOCKS = [
+        (re.compile(r'^\s*while\b',      re.IGNORECASE),
+         re.compile(r'^\s*endwhile\b',   re.IGNORECASE)),
+        (re.compile(r'^\s*fork\b',       re.IGNORECASE),
+         re.compile(r'^\s*(end\s+fork|fork\s+again)\b', re.IGNORECASE)),
+        (re.compile(r'^\s*if\b',         re.IGNORECASE),
+         re.compile(r'^\s*endif\b',      re.IGNORECASE)),
+        (re.compile(r'^\s*repeat\b',     re.IGNORECASE),
+         re.compile(r'^\s*repeat\s+while\b', re.IGNORECASE)),
+    ]
+
+    counters = [0] * len(_BLOCKS)
+    out = []
+    for ln in puml.splitlines():
+        drop = False
+        for i, (opener, closer) in enumerate(_BLOCKS):
+            if opener.match(ln):
+                counters[i] += 1
+            elif closer.match(ln):
+                if counters[i] <= 0:
+                    print(f"      [REPAIR] Removed orphan activity keyword: {ln.strip()!r}")
+                    drop = True
+                    break
+                else:
+                    counters[i] -= 1
+        if not drop:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def repair_undeclared_alias_edges(puml: str, diagram_type: str) -> str:
+    """
+    Remove edge lines that reference an alias which was never declared.
+
+    Root cause: the LLM declares  rectangle "Imagery Pipeline" { }  with no
+    `as alias` clause, then later writes edges like:
+        view_imagery --> imagery_pipeline : uses
+    PlantUML implicitly creates `imagery_pipeline` as an unknown type, which
+    causes diagram-type detection to misfire (often 'Assumed type: component').
+
+    Strategy:
+    1. Collect all declared aliases (from `as <alias>` clauses).
+    2. Collect all bare identifiers used on edge lines.
+    3. Drop edge lines where BOTH endpoints are unknown (fully undeclared edges).
+       Edges where at least one end is a known alias are kept.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    _AS_DECL   = re.compile(r'\bas\s+(\w+)', re.IGNORECASE)
+    _EDGE_LINE = re.compile(
+        r'(-->|<--|<-->|\.\.>|<\.\.|--|\.\.|<\|--|--\|>|\*--|o--)',
+        re.IGNORECASE,
+    )
+    # Split an edge line into LHS and RHS around the arrow
+    _EDGE_SPLIT = re.compile(
+        r'^(\s*)([\w"]+(?:\s+[\w"]+)*?)\s*'
+        r'(-->|<--|<-->|\.\.>|<\.\.|--|\.\.)'
+        r'\s*([\w"]+(?:\s+[\w"]+)*?)(\s*:.*)?$',
+        re.IGNORECASE,
+    )
+
+    lines = puml.splitlines()
+
+    # Pass 1: collect declared aliases and bare-word element names
+    declared: set = set()
+    for ln in lines:
+        for m in _AS_DECL.finditer(ln):
+            declared.add(m.group(1))
+
+    if not declared:
+        return puml  # nothing to cross-reference against
+
+    # Pass 2: drop edges where both sides are undeclared bare identifiers
+    out = []
+    for ln in lines:
+        if not _EDGE_LINE.search(ln) or ln.strip().startswith("'"):
+            out.append(ln)
+            continue
+        m = _EDGE_SPLIT.match(ln)
+        if not m:
+            out.append(ln)
+            continue
+        lhs = m.group(2).strip().strip('"')
+        rhs = m.group(4).strip().strip('"')
+        # Keep if at least one side is a known declared alias
+        if lhs in declared or rhs in declared:
+            out.append(ln)
+        else:
+            print(f"      [REPAIR] Removed edge with undeclared aliases ({lhs!r}, {rhs!r}): {ln.strip()!r}")
+
+    return "\n".join(out)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -1780,7 +1903,9 @@ def pass3_generate_all(
         puml = repair_wrong_element_types(puml, dtype)
         puml = repair_trailing_edge_colon(puml)
         puml = repair_stray_closing_braces(puml, dtype)
+        puml = repair_undeclared_alias_edges(puml, dtype)
         if dtype == "activity":
+            puml = repair_orphan_activity_keywords(puml)
             puml = repair_truncated_activity(puml)
         if dtype == "class":
             puml = repair_class_diagram_lines(puml)
@@ -1818,7 +1943,9 @@ def pass3_generate_all(
             repaired = repair_wrong_element_types(repaired, dtype)
             repaired = repair_trailing_edge_colon(repaired)
             repaired = repair_stray_closing_braces(repaired, dtype)
+            repaired = repair_undeclared_alias_edges(repaired, dtype)
             if dtype == "activity":
+                repaired = repair_orphan_activity_keywords(repaired)
                 repaired = repair_truncated_activity(repaired)
             if dtype == "class":
                 repaired = repair_class_diagram_lines(repaired)
