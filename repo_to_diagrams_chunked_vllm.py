@@ -26,13 +26,12 @@ Usage:
 # vLLM env vars MUST be set before importing vllm
 # ---------------------------------------------------------------------------
 import os
-os.environ.setdefault("VLLM_USE_V1",                   "1")
-os.environ.setdefault("VLLM_NO_CUDA_GRAPH",            "1")
-os.environ.setdefault("VLLM_ENFORCE_EAGER",            "1")
+# VLLM_WORKER_MULTIPROC_METHOD and VLLM_USE_MODELSCOPE are still valid.
+# VLLM_USE_V1, VLLM_NO_CUDA_GRAPH, VLLM_ENFORCE_EAGER, VLLM_MAX_NUM_SEQS,
+# VLLM_GPU_MEMORY_UTILIZATION were removed/renamed in newer vLLM releases —
+# their equivalents are now passed directly as LLM() constructor arguments.
 os.environ.setdefault("VLLM_USE_MODELSCOPE",           "0")
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD",  "spawn")
-os.environ.setdefault("VLLM_MAX_NUM_SEQS",             "32")
-os.environ.setdefault("VLLM_GPU_MEMORY_UTILIZATION",   "0.85")
 
 import json, re, sys, argparse
 from typing import Dict, List, Optional, Tuple
@@ -89,7 +88,8 @@ MODEL_DEFAULTS: List[Tuple[str, int]] = [
     # DeepSeek (128k native)
     ("deepseek",         128_000),
     # gpt-oss-120b (128k native)
-    ("gpt-oss-120b",         128_000),
+    ("gpt-oss-120b",     128_000),
+
 ]
 DEFAULT_MAX_MODEL_LEN = 32_000   # safe fallback for unknown models
 
