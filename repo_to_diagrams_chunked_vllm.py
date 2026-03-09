@@ -120,9 +120,16 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Entry/exit use [*]."
     ),
     "usecase": (
+        "ALLOWED elements: actor, usecase, rectangle, package, note.\n"
+        "NEVER use: participant, node, cloud, component, queue, artifact.\n"
         'Rectangle names with spaces MUST be quoted: rectangle "My Service" { }\n'
         'Actor names with spaces must be quoted: actor "End User" as u\n'
-        'Use case names with spaces must be quoted: usecase "Do Something" as UC1'
+        'Use case names with spaces must be quoted: usecase "Do Something" as UC1\n'
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  usecase \"Do Something\" as \"Do Something\"\n"
+        "  CORRECT: usecase \"Do Something\" as do_something\n"
+        "BRACE DISCIPLINE: every { must have exactly one matching }.\n"
+        "Write ALL declarations and close ALL { } blocks BEFORE writing any edges."
     ),
     "class": (
         "STRICT CLASS-ONLY OUTPUT (no mixing):\n"
@@ -150,61 +157,76 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Members: + public, - private, # protected\n"
         "Hard constraints:\n"
         "- Do not mix other diagram element families here (no component/queue/node/participant/object).\n"
-        "- Relationship arrows go on their OWN lines, never on a class declaration line."
+        "- Relationship arrows go on their OWN lines, never on a class declaration line.\n"
+        "- Every { must have exactly one matching }. Never emit an orphaned closing }."
     ),
     "sequence": (
+        "ALLOWED elements: participant, actor, boundary, control, entity, database, collections.\n"
+        "NEVER use: node, component, queue, cloud, artifact, rectangle, object, class.\n"
         "Declare all participants at the top before any arrows.\n"
         'participant "Name" as alias\n'
         "Sync call: A -> B : message\n"
         "Return:    B --> A : response\n"
         "activate B / deactivate B\n"
         "Groups: alt/else/end, loop, opt\n"
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  participant \"My Server\" as \"My Server\"\n"
+        "  CORRECT: participant \"My Server\" as my_server\n"
+        "File paths: replace / with _ in display names:\n"
+        "  WRONG:  participant \"ui/server.py\"\n"
+        "  CORRECT: participant \"ui_server.py\" as server\n"
         "Hard constraints:\n"
         "- Every participant referenced in a message must be declared before messages.\n"
         "- If a participant name contains spaces, quote it and/or use an alias; message endpoints should be aliases."
     ),
     "component": (
-        'Components/packages/frames with spaces must be quoted.\n'
-        'component "My Component" as alias\n'
-        'interface "My API" as api\n'
-        'queue "message_queue" as mq\n'
-        "\n"
+        "ALLOWED elements: component, interface, queue, database, cloud, artifact, node, package, rectangle.\n"
+        "NEVER use: participant, boundary, control, entity, collections.\n"
+        'Components/packages/frames with spaces must be quoted: component "My Component" as my_component\n'
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  component \"MQTT Listener\" as \"MQTT Listener\"\n"
+        "  CORRECT: component \"MQTT Listener\" as mqtt_listener\n"
+        "Every alias must be unique within the diagram.\n"
+        "Edge labels must have text, or omit the colon entirely:\n"
+        "  WRONG:  A --> B :\n"
+        "  CORRECT: A --> B : publishes  OR  A --> B\n"
         "Declare ALL elements before edges.\n"
-        "Edges must use --> or ..> only.\n"
-        "Never use .>.\n"
+        "Edges must use --> or ..> only. Never use .>.\n"
         "Never create new keywords like exchange or topic.\n"
         "Represent messaging exchanges as stereotypes:\n"
         'queue "celebrity_names" <<exchange>>\n'
-        "Links: A --> B, A ..> B (dependency)\n"
-        "Hard constraints (avoid common syntax traps):\n"
-        "- Do NOT define/alias an element inline inside a link line. (INVALID: `A --> \"Thing\" as T`). Declare first, then connect.\n"
-        "- One edge per line. Do NOT use comma-separated targets. (INVALID: `A --> B, C`).\n"
-        "- Do not mix other diagram element families (e.g., class/object/participant) in a component diagram."
-        "\n"
-        "Do NOT declare elements inline on edges (e.g. A --> interface \"X\" as x). Declare first, then connect."
+        "Hard constraints:\n"
+        "- Do NOT define/alias an element inline inside a link line.\n"
+        "- One edge per line. Do NOT use comma-separated targets.\n"
+        "- Do not mix other diagram element families (e.g., class/object/participant)."
     ),
     "deployment": (
+        "ALLOWED elements: node, component, artifact, database, cloud, queue, package.\n"
+        "NEVER use: participant, boundary, control, entity, collections, actor.\n"
         'Nodes/clouds/frames with spaces must be quoted: node "My Node" { }\n'
-        'cloud "AWS" { }\n'
-        'frame "VPC" { }\n'
-        "Artifacts: artifact \"app.jar\"\n"
-        "Links: A --> B : label\n"
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  node \"MongoDB Cluster\" as \"Mongo Cluster\"\n"
+        "  CORRECT: node \"MongoDB Cluster\" as Mongo_Cluster\n"
+        "Write ALL node/component declarations and close ALL { } blocks BEFORE writing edges.\n"
         "Hard constraints:\n"
-        "- There is no `exchange` keyword. If you need to model a RabbitMQ exchange/topic, represent it as an `artifact` or `component`\n"
-        "  with a descriptive label (e.g., `artifact \"exchange: celebrity_names\" as EX`).\n"
+        "- There is no `exchange` keyword. Represent exchanges as artifact or component with label.\n"
         "- Do NOT define/alias an element inline inside a link line. Declare first, then connect.\n"
         "- One edge per line. Do NOT use comma-separated targets."
     ),
     "object": (
-        "Object diagrams should only use `object` declarations and links between objects.\n"
-        'object "name:Type" as o1\n'
-        "Links: o1 -- o2\n"
-        "Hard constraints:\n"
-        "- Do not include queue/component/class/node/participant elements.\n"
-        "- If mixing is unavoidable, add `allowmixing`, but prefer separate diagrams."
+        "ALLOWED elements: object, note.\n"
+        "NEVER use: class, component, participant, node, queue, cloud.\n"
         'Object instances: object "instanceName : ClassName" as alias\n'
         "Field values: alias : field = value\n"
-        "Links same as class diagram."
+        "DECLARATION ORDER (critical — PlantUML errors if violated):\n"
+        "  1. ALL  object \"Name\" as alias  declarations\n"
+        "  2. ALL  alias : field = value  field assignments\n"
+        "  3. ALL edges\n"
+        "Never reference an alias in an edge before its object declaration.\n"
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  object \"config:ConfigParser\" as \"config\"\n"
+        "  CORRECT: object \"config:ConfigParser\" as config\n"
+        "Links: o1 --> o2 : label  or  o1 *-- o2"
     ),
 }
 
@@ -650,35 +672,54 @@ GENERATION_SYSTEM = (
     "Generate strictly valid PlantUML 1.2025.10 diagrams. "
     "Use ONLY canonical names from the Entity Registry — never invent new names. "
     "Output ONLY the @startuml...@enduml block.\n\n"
+
     "STRICT PLANTUML 1.2025.10 SYNTAX RULES:\n"
     "- Activity: modern syntax only (start/stop/:action;/fork). NEVER (*) -->.\n"
     "- State: transitions use '--> State : label'. NEVER -->|label|.\n"
     "- Use case/component/deployment: ALL multi-word names must be double-quoted.\n"
     "- Class: <|-- inherit, *-- compose, o-- aggregate, --> associate.\n"
-    "- Sequence: declare all participants before first arrow."
-    "PLANTUML VALIDATION CONTRACT:\n"
-    "- Never output PlantUML error text.\n"
-    "- Never reference undeclared elements/aliases.\n"
-    "- Every element must be declared before it is used in an edge.\n"
-    "- Do NOT declare elements inline on edges.\n"
-    "- Forbidden legacy/mistyped tokens: 'exchange' keyword, '.>' arrows, '->>' arrows.\n\n"
+    "- Sequence: declare all participants before first arrow.\n\n"
 
-    "ALLOWED KEYWORDS (global):\n"
-    "- component, interface, database, cloud, node, artifact, actor, package, rectangle, frame, queue,\n"
-    "  participant, object, class, enum, note, skinparam, title, legend, left to right direction.\n"
-    "- Forbidden keywords: exchange, topic, fanout, pubsub, service, lambda.\n"
-    "- If you need an exchange/topic concept, represent it as a queue with a stereotype:\n"
-    "  queue \"X\" <<exchange>>\n\n"
+    "ALIAS RULES (critical):\n"
+    "- Aliases must be plain identifiers: letters, digits, underscores ONLY.\n"
+    "- NEVER quote an alias: WRONG: as \"Mongo Cluster\"  CORRECT: as Mongo_Cluster\n"
+    "- Every alias must be unique within the diagram — never assign the same alias twice.\n"
+    "- After declaring  component \"Foo\" as foo  always refer to the element as  foo  not  \"Foo\".\n\n"
+
+    "DECLARATION ORDER (critical):\n"
+    "- Declare ALL elements first, then write ALL edges. Never interleave.\n"
+    "- An element used in an edge must have an explicit declaration above that edge.\n"
+    "- For object diagrams: declare all objects, then field assignments, then edges.\n\n"
+
+    "BRACE DISCIPLINE:\n"
+    "- Every  {  must have exactly one matching  }.\n"
+    "- Never emit a bare  }  that has no matching opener.\n"
+    "- Group blocks (node/package/rectangle) must be fully closed before writing edges.\n\n"
 
     "EDGE RULES:\n"
-    "- Allowed arrows: -->, <--> , ..> , <.. , ..|> , <|-- , *-- , o--.\n"
+    "- Allowed arrows: -->, <-->, ..>, <.., ..|>, <|--, *--, o--.\n"
     "- NEVER use .> or ->> or =>.\n"
     "- Never declare new elements inline on an edge.\n"
-    "- All elements must be declared first, then edges listed afterward.\n\n"
+    "- Edge labels MUST have text: WRONG: A --> B :   CORRECT: A --> B : calls  or just  A --> B\n\n"
 
-    "QUOTING RULES:\n"
-    "- Names containing spaces MUST be quoted.\n"
-    "- Aliases must be used consistently after declaration.\n\n"
+    "ELEMENT TYPES PER DIAGRAM (do not mix):\n"
+    "- sequence:   participant, actor, boundary, control, entity, database, collections\n"
+    "- component:  component, interface, queue, database, cloud, artifact, node, package, rectangle\n"
+    "- deployment: node, component, artifact, database, cloud, queue, package\n"
+    "- class:      class, abstract class, interface, enum, package, namespace\n"
+    "- object:     object, note\n"
+    "- usecase:    actor, usecase, rectangle, package, note\n"
+    "- NEVER use 'participant' outside sequence diagrams.\n"
+    "- NEVER use 'node' or 'cloud' inside class or sequence diagrams.\n\n"
+
+    "ALLOWED KEYWORDS (global):\n"
+    "- Forbidden keywords: exchange, topic, fanout, pubsub, service, lambda.\n"
+    "- Represent exchange/topic concepts as:  queue \"X\" <<exchange>>\n\n"
+
+    "NAME SANITISATION:\n"
+    "- File paths and names containing  /  must be replaced with  _  before use.\n"
+    "- CORRECT: participant \"ui_server.py\" as server\n"
+    "- WRONG:   participant \"ui/server.py\" as server\n\n"
 
     "If any generated line violates these rules, rewrite it before output."
 )
