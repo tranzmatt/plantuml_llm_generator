@@ -1203,6 +1203,183 @@ def repair_slash_in_quoted_name(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_trailing_edge_colon(puml: str) -> str:
+    """
+    Remove a trailing bare ':' on edge lines that has no label text following it.
+
+    Example:
+        rekognition --> mqtt_listener :    ← syntax error
+        rekognition --> mqtt_listener      ← fixed
+
+    PlantUML treats ' :' as the start of a label; if nothing follows it gets
+    confused and sometimes misidentifies the diagram type.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    _EDGE_BARE_COLON = re.compile(
+        r'^(\s*.*(?:-->|<--|<-->|\.\.>|<\.\.|--|\.\.).*?)\s*:\s*$'
+    )
+    out = []
+    for ln in puml.splitlines():
+        m = _EDGE_BARE_COLON.match(ln)
+        if m:
+            fixed = m.group(1)
+            print(f"      [REPAIR] Removed trailing bare colon from edge: {ln.strip()!r}")
+            out.append(fixed)
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def repair_quoted_aliases(puml: str) -> str:
+    """
+    Fix `as "Multi Word Alias"` → `as Multi_Word_Alias`.
+
+    PlantUML requires aliases to be plain identifiers (no spaces, no quotes).
+    The LLM frequently writes:
+        node "MongoDB Cluster" as "Mongo Cluster" {
+    which causes a syntax error.  We slugify the quoted alias and rewrite all
+    downstream references to the old quoted form.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Match:  ... as "Some Name"  (optionally followed by { or end of line)
+    _QUOTED_AS = re.compile(r'\bas\s+"([^"]+)"', re.IGNORECASE)
+
+    lines = puml.splitlines()
+    # First pass: collect all quoted→slug replacements
+    replacements: Dict[str, str] = {}   # "Mongo Cluster" → Mongo_Cluster
+    for ln in lines:
+        for m in _QUOTED_AS.finditer(ln):
+            quoted = m.group(1)
+            if quoted not in replacements:
+                slug = re.sub(r'\W+', '_', quoted).strip('_')
+                replacements[quoted] = slug
+
+    if not replacements:
+        return puml
+
+    # Second pass: rewrite declarations and all references
+    out = []
+    for ln in lines:
+        original = ln
+        # Replace  as "Quoted Name"  →  as Slug
+        for quoted, slug in replacements.items():
+            ln = re.sub(
+                r'\bas\s+"' + re.escape(quoted) + r'"',
+                f'as {slug}',
+                ln, flags=re.IGNORECASE,
+            )
+            # Also replace bare "Quoted Name" used as a reference on edge lines
+            # (only on non-declaration lines to avoid double-processing)
+            ln = re.sub(r'"' + re.escape(quoted) + r'"', slug, ln)
+        if ln != original:
+            print(f"      [REPAIR] Slugified quoted alias: {original.strip()!r} → {ln.strip()!r}")
+        out.append(ln)
+    return "\n".join(out)
+
+
+def repair_forward_referenced_objects(puml: str) -> str:
+    """
+    Fix 'Object already exists' errors in object diagrams.
+
+    When edges reference an alias before its `object "..." as alias` declaration,
+    PlantUML implicitly creates a bare element for that alias.  The explicit
+    declaration later then collides.
+
+    Fix: move all `object "..." as alias` declarations to the top of the diagram
+    body (just after @startuml), before any edges or field assignments.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    _OBJ_DECL = re.compile(r'^\s*object\s+', re.IGNORECASE)
+    _EDGE_OR_FIELD = re.compile(
+        r'(-->|<--|<-->|\.\.>|<\.\.|--|\.\.|^\s*\w+\s*:\s*\w+\s*=)',
+    )
+
+    lines = puml.splitlines()
+    header = []
+    decls = []
+    body = []
+
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith('@startuml') or s.startswith('@enduml') or not s:
+            header.append(ln) if s.startswith('@startuml') or not s and not body else body.append(ln)
+            if s.startswith('@enduml'):
+                body.append(ln)
+            elif s.startswith('@startuml'):
+                pass  # already added
+        elif _OBJ_DECL.match(ln):
+            decls.append(ln)
+        else:
+            body.append(ln)
+
+    if not decls:
+        return puml
+
+    # Rebuild: @startuml, object declarations, then rest
+    startuml_line = next((ln for ln in lines if ln.strip().startswith('@startuml')), '@startuml')
+    enduml_line   = next((ln for ln in lines if ln.strip() == '@enduml'), '@enduml')
+    inner = [ln for ln in lines
+             if not ln.strip().startswith('@startuml')
+             and ln.strip() != '@enduml'
+             and not _OBJ_DECL.match(ln)]
+
+    result = [startuml_line] + decls + inner + [enduml_line]
+    rebuilt = "\n".join(result)
+    if rebuilt != puml:
+        print(f"      [REPAIR] Moved {len(decls)} object declaration(s) before edges.")
+    return rebuilt
+
+
+def repair_stray_closing_braces(puml: str, diagram_type: str) -> str:
+    """
+    Remove `}` lines that have no matching opener in the diagram body.
+
+    This catches the pattern seen in usecase diagrams where the LLM emits a
+    stray `}` (likely meant to close a `rectangle` block it forgot to open),
+    which breaks PlantUML's group context and causes a java.lang.IllegalStateException
+    when subsequent edges try to add elements outside any valid group.
+
+    Only applied to diagram types where bare group context errors occur:
+    usecase, component, deployment.
+    """
+    if diagram_type not in ("usecase", "component", "deployment", "sequence"):
+        return puml
+    if "@startuml" not in puml:
+        return puml
+
+    depth = 0
+    out = []
+    for ln in puml.splitlines():
+        s = ln.strip()
+        # Track openers (lines ending with { or being pure {)
+        opens  = s.count('{')
+        closes = s.count('}')
+        if closes > opens and depth + (opens - closes) < 0:
+            to_drop = closes - opens - depth
+            fixed = ln
+            for _ in range(to_drop):
+                idx = fixed.rfind('}')
+                if idx != -1:
+                    fixed = fixed[:idx] + fixed[idx+1:]
+            fixed = fixed.rstrip()
+            if fixed != ln.rstrip():
+                print(f"      [REPAIR] Removed {to_drop} stray '}}' in {diagram_type}: {ln.strip()!r}")
+            if fixed.strip():
+                out.append(fixed)
+            depth = max(0, depth + opens - closes + to_drop)
+        else:
+            out.append(ln)
+            depth = max(0, depth + opens - closes)
+
+    return "\n".join(out)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -1555,15 +1732,20 @@ def pass3_generate_all(
         puml = extract_start_end_block(raw)
         # Auto-repair common structural mistakes before validation
         puml = repair_duplicate_aliases(puml)
+        puml = repair_quoted_aliases(puml)
         puml = repair_unquoted_multiword_edges(puml)
         puml = repair_slash_names(puml)
         puml = repair_slash_in_quoted_name(puml)
         puml = repair_wrong_element_types(puml, dtype)
+        puml = repair_trailing_edge_colon(puml)
+        puml = repair_stray_closing_braces(puml, dtype)
         if dtype == "activity":
             puml = repair_truncated_activity(puml)
         if dtype == "class":
             puml = repair_class_diagram_lines(puml)
             puml = repair_unbalanced_class_braces(puml)
+        if dtype == "object":
+            puml = repair_forward_referenced_objects(puml)
         results[dtype] = puml
 
     # One retry per failing diagram type (only for the known failure patterns)
@@ -1588,15 +1770,20 @@ def pass3_generate_all(
         for dtype, raw in zip(retry_types, retry_raw):
             repaired = extract_start_end_block(raw)
             repaired = repair_duplicate_aliases(repaired)
+            repaired = repair_quoted_aliases(repaired)
             repaired = repair_unquoted_multiword_edges(repaired)
             repaired = repair_slash_names(repaired)
             repaired = repair_slash_in_quoted_name(repaired)
             repaired = repair_wrong_element_types(repaired, dtype)
+            repaired = repair_trailing_edge_colon(repaired)
+            repaired = repair_stray_closing_braces(repaired, dtype)
             if dtype == "activity":
                 repaired = repair_truncated_activity(repaired)
             if dtype == "class":
                 repaired = repair_class_diagram_lines(repaired)
                 repaired = repair_unbalanced_class_braces(repaired)
+            if dtype == "object":
+                repaired = repair_forward_referenced_objects(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
             errs = validate_puml(dtype, repaired)
             if errs:
