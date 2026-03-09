@@ -86,6 +86,8 @@ MODEL_DEFAULTS: List[Tuple[str, int]] = [
     ("qwen",             128_000),
     # DeepSeek (128k native)
     ("deepseek",         128_000),
+    # gpt-oss-120b (128k native)
+    ("gpt-oss-120b",         128_000),
 ]
 DEFAULT_MAX_MODEL_LEN = 32_000   # safe fallback for unknown models
 
