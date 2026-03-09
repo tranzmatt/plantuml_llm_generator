@@ -43,9 +43,6 @@ import requests
 from sentence_transformers import SentenceTransformer
 from vllm import LLM, SamplingParams
 
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="mistral_common")
-
 # ---------------------------------------------------------------------------
 # Diagram catalogue
 # ---------------------------------------------------------------------------
@@ -70,6 +67,38 @@ GENERATION_CHUNK_BUDGET  = 24_000
 # (different BOS/EOS handling, special tokens, etc.).  A margin of 64 ensures
 # our pre-check is always stricter than vLLM's hard limit.
 CONTEXT_SAFETY_MARGIN    = 64
+
+# ---------------------------------------------------------------------------
+# Per-model context defaults
+# Matched by substring (case-insensitive) against the --model argument.
+# --max-model-len overrides these when explicitly provided.
+# ---------------------------------------------------------------------------
+MODEL_DEFAULTS: List[Tuple[str, int]] = [
+    # Llama 4 (MoE — low KV-cache cost, full 128k safe on 4×A100)
+    ("llama-4",          128_000),
+    # Llama 3.x (dense — 128k supported, KV cache is heavier)
+    ("llama-3",          128_000),
+    # Mistral Large 2411 (123B dense — KV cache expensive, 48k is safe on 4×A100 80GB)
+    ("mistral-large",     48_000),
+    # Mistral Small / Nemo (smaller dense models)
+    ("mistral",           32_000),
+    # Qwen 2.5 / 3 (128k native)
+    ("qwen",             128_000),
+    # DeepSeek (128k native)
+    ("deepseek",         128_000),
+]
+DEFAULT_MAX_MODEL_LEN = 32_000   # safe fallback for unknown models
+
+
+def resolve_max_model_len(model_name: str, override: Optional[int]) -> int:
+    """Return effective max_model_len: explicit override > model table > fallback."""
+    if override is not None:
+        return override
+    lower = model_name.lower()
+    for pattern, length in MODEL_DEFAULTS:
+        if pattern in lower:
+            return length
+    return DEFAULT_MAX_MODEL_LEN
 
 # ---------------------------------------------------------------------------
 # Per-diagram syntax rules injected into every generation prompt
@@ -1449,8 +1478,10 @@ def main() -> None:
                         default=os.environ.get("VLLM_MODEL", "meta-llama/Llama-4-Scout-17B-16E-Instruct"))
     parser.add_argument("--tp",    type=int,
                         default=int(os.environ.get("VLLM_TP",   "4")))
+    _env_len = os.environ.get("VLLM_MAX_LEN")
     parser.add_argument("--max-model-len", type=int,
-                        default=int(os.environ.get("VLLM_MAX_LEN",    "32000")))
+                        default=int(_env_len) if _env_len else None,
+                        help="Override context length. Auto-detected from model name if omitted.")
     parser.add_argument("--max-tokens",    type=int,
                         default=int(os.environ.get("VLLM_MAX_TOKENS",  "2048")))
     parser.add_argument("--extract-tokens", type=int,
@@ -1468,6 +1499,14 @@ def main() -> None:
     parser.add_argument("--registry-file",
                         help="Load existing registry JSON — skips Pass 1 and Pass 2.")
     args = parser.parse_args()
+
+    # Resolve effective context length (override > model table > fallback)
+    _override = args.max_model_len  # None if not supplied
+    args.max_model_len = resolve_max_model_len(args.model, _override)
+    if _override is None:
+        print(f"[INFO] Auto-detected max_model_len={args.max_model_len:,} for model '{args.model}'")
+    else:
+        print(f"[INFO] Using --max-model-len={args.max_model_len:,} (override)")
 
     repo_root  = os.path.abspath(args.input)
     output_dir = os.path.abspath(args.output)
