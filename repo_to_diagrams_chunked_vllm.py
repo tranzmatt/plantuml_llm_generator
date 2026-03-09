@@ -1063,6 +1063,146 @@ def repair_slash_names(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_unbalanced_class_braces(puml: str) -> str:
+    """
+    Remove extra closing braces in class diagrams that cause PlantUML to throw
+    java.lang.IllegalStateException (Assumed diagram type: class).
+
+    The LLM sometimes emits double `}` after a class body:
+        class Foo {
+        }
+        }       ← orphaned extra brace
+
+    Strategy: walk the lines tracking brace depth.  Any `}` that would push
+    depth below zero (i.e. it has no matching opener) is dropped.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    depth = 0
+    out: List[str] = []
+    for ln in puml.splitlines():
+        stripped = ln.strip()
+        opens  = stripped.count("{")
+        closes = stripped.count("}")
+        net    = opens - closes
+
+        if net < 0 and depth + net < 0:
+            # This line has more closes than the current depth allows — drop orphans
+            to_drop = -(depth + net)
+            fixed = ln
+            for _ in range(to_drop):
+                # Remove the last unmatched `}` from the line
+                idx = fixed.rfind("}")
+                if idx != -1:
+                    fixed = fixed[:idx] + fixed[idx+1:]
+            fixed = fixed.rstrip()
+            if fixed != ln.rstrip():
+                print(f"      [REPAIR] Removed {to_drop} unbalanced '}}' from: {ln.strip()!r}")
+            if fixed.strip():
+                out.append(fixed)
+            depth = max(0, depth + net + to_drop)
+        else:
+            out.append(ln)
+            depth = max(0, depth + net)
+
+    return "\n".join(out)
+
+
+# Element keywords that are only valid in specific diagram families.
+# Maps diagram_type → set of line-start keywords that should NOT appear there.
+_WRONG_ELEMENT_RE: Dict[str, re.Pattern] = {
+    "deployment": re.compile(
+        r"^\s*(participant|actor\b|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+    "component": re.compile(
+        r"^\s*(participant|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+    "class": re.compile(
+        r"^\s*(participant|node|cloud|queue\b|artifact|rectangle\b|frame\b|actor\b|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+    "object": re.compile(
+        r"^\s*(participant|node|cloud|queue\b|artifact|rectangle\b|frame\b|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+    "usecase": re.compile(
+        r"^\s*(participant|node|cloud|queue\b|artifact|boundary|control|entity|collections)\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def repair_wrong_element_types(puml: str, diagram_type: str) -> str:
+    """
+    Strip lines that use element keywords illegal for this diagram type.
+
+    Example: a deployment diagram containing `participant "MqttListener" ...`
+    will fail with 'Syntax Error? (Assumed diagram type: component)'.
+    Dropping the offending line is safer than a retry.
+    """
+    rx = _WRONG_ELEMENT_RE.get(diagram_type)
+    if rx is None or "@startuml" not in puml:
+        return puml
+
+    out: List[str] = []
+    for ln in puml.splitlines():
+        if rx.match(ln):
+            print(f"      [REPAIR] Removed wrong-type element from {diagram_type}: {ln.strip()!r}")
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
+def repair_slash_in_quoted_name(puml: str) -> str:
+    """
+    Fix broken quoting caused by slashes inside participant/actor display names.
+
+    The LLM (or repair_slash_names) sometimes produces:
+        participant "imagery-"ui/server".py" as Server
+    where the slash caused inner quoting that breaks the outer string.
+
+    Two patterns fixed:
+    1. Inner quotes around a slash-containing token inside a larger quoted string:
+           "text-"word/word"suffix"  →  "text-word_word-suffix"
+    2. A bare slash remaining inside an already-quoted name:
+           "some/path.py"            →  "some_path.py"
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    # Pattern 1: "outer-"inner/word"rest" — inner pair of quotes inside outer quotes
+    _INNER_QUOTED_SLASH = re.compile(r'"([^"]*)"([\w./]+/[\w./]+)"([^"]*)"')
+
+    # Pattern 2: slash remaining inside a quoted string
+    _SLASH_INSIDE_QUOTE = re.compile(r'"([^"]*)/([^"]*)"')
+
+    out: List[str] = []
+    for ln in puml.splitlines():
+        s = ln.strip()
+        # Only process participant/actor declaration lines
+        if not re.match(r'^\s*(participant|actor)\b', s, re.IGNORECASE):
+            out.append(ln)
+            continue
+
+        original = ln
+        # Fix pattern 1: collapse inner quotes + slash into clean token
+        ln = _INNER_QUOTED_SLASH.sub(
+            lambda m: f'"{m.group(1)}{m.group(2).replace("/", "_")}{m.group(3)}"', ln
+        )
+        # Fix pattern 2: replace slash inside quotes with underscore
+        ln = _SLASH_INSIDE_QUOTE.sub(
+            lambda m: f'"{m.group(1)}_{m.group(2)}"', ln
+        )
+        if ln != original:
+            print(f"      [REPAIR] Fixed slash in quoted name: {original.strip()!r} → {ln.strip()!r}")
+        out.append(ln)
+
+    return "\n".join(out)
+
+
 def extract_start_end_block(raw: str) -> str:
     m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
     if m:
@@ -1417,10 +1557,13 @@ def pass3_generate_all(
         puml = repair_duplicate_aliases(puml)
         puml = repair_unquoted_multiword_edges(puml)
         puml = repair_slash_names(puml)
+        puml = repair_slash_in_quoted_name(puml)
+        puml = repair_wrong_element_types(puml, dtype)
         if dtype == "activity":
             puml = repair_truncated_activity(puml)
         if dtype == "class":
             puml = repair_class_diagram_lines(puml)
+            puml = repair_unbalanced_class_braces(puml)
         results[dtype] = puml
 
     # One retry per failing diagram type (only for the known failure patterns)
@@ -1447,10 +1590,13 @@ def pass3_generate_all(
             repaired = repair_duplicate_aliases(repaired)
             repaired = repair_unquoted_multiword_edges(repaired)
             repaired = repair_slash_names(repaired)
+            repaired = repair_slash_in_quoted_name(repaired)
+            repaired = repair_wrong_element_types(repaired, dtype)
             if dtype == "activity":
                 repaired = repair_truncated_activity(repaired)
             if dtype == "class":
                 repaired = repair_class_diagram_lines(repaired)
+                repaired = repair_unbalanced_class_braces(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
             errs = validate_puml(dtype, repaired)
             if errs:
