@@ -81,6 +81,10 @@ MODEL_DEFAULTS: List[Tuple[str, int]] = [
     ("mistral-large-3",  262_144),
     # Mistral Large 2411 123B (dense — KV cache expensive, 48k safe on 4×A100 80GB)
     ("mistral-large",     48_000),
+    # Devstral 2 123B (code-focused, 256k context)
+    ("devstral",         262_144),
+    # Mixtral 8x22B MoE (64k context)
+    ("mixtral",           64_000),
     # Mistral Small / Nemo (smaller dense models)
     ("mistral",           32_000),
     # Qwen 2.5 / 3 (128k native)
@@ -89,7 +93,6 @@ MODEL_DEFAULTS: List[Tuple[str, int]] = [
     ("deepseek",         128_000),
     # gpt-oss-120b (128k native)
     ("gpt-oss-120b",     128_000),
-
 ]
 DEFAULT_MAX_MODEL_LEN = 32_000   # safe fallback for unknown models
 
