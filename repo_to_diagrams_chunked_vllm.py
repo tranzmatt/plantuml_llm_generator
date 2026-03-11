@@ -36,11 +36,16 @@ os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD",  "spawn")
 import json, re, sys, argparse
 from typing import Dict, List, Optional, Tuple
 
+import torch
 import faiss
 import numpy as np
 import requests
 from sentence_transformers import SentenceTransformer
 from vllm import LLM, SamplingParams
+
+# Enable TF32 for float32 matmuls on Ampere/Ada/Hopper GPUs (A100, RTX 6000 Ada, H100…).
+# Gives a meaningful throughput boost with negligible precision loss.
+torch.set_float32_matmul_precision("high")
 
 # ---------------------------------------------------------------------------
 # Diagram catalogue
@@ -75,7 +80,7 @@ CONTEXT_SAFETY_MARGIN    = 64
 MODEL_DEFAULTS: List[Tuple[str, int]] = [
     # Llama 4 Scout/Maverick (MoE — 10M native, 256k practical cap on 4×A100 80GB)
     # Use --max-model-len to push higher if your hardware allows
-    ("llama-4",          262_144),
+    ("llama-4",          256_000),
     # Llama 3.1 / 3.3 (dense 128k native)
     ("llama-3",          128_000),
     # Mistral Large 3 675B (NVFP4 quantized — 256k native)
@@ -349,7 +354,6 @@ def preflight_vram_check(model: str, tp: int, gpu_memory_utilization: float) -> 
     quantized or sharded models may still work even when the estimate looks
     tight.
     """
-    import torch
     try:
         from huggingface_hub import model_info as hf_model_info
     except ImportError:
