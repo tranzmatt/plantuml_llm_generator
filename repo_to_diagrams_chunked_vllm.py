@@ -179,7 +179,13 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Hard constraints:\n"
         "- Do not mix other diagram element families here (no component/queue/node/participant/object).\n"
         "- Relationship arrows go on their OWN lines, never on a class declaration line.\n"
-        "- Every { must have exactly one matching }. Never emit an orphaned closing }."
+        "- Every { must have exactly one matching }. Never emit an orphaned closing }.\n"
+        "- Every class/interface/enum declaration that opens a { MUST close it with } before ANY relationship arrows.\n"
+        "  WRONG:  class ImageryRouter {\n"
+        "  (arrows here before } closes the body)\n"
+        "  CORRECT: class ImageryRouter {\n"
+        "           }\n"
+        "           Child <|-- Parent"
     ),
     "sequence": (
         "ALLOWED elements: participant, actor, boundary, control, entity, database, collections.\n"
@@ -1204,34 +1210,45 @@ def repair_slash_names(puml: str) -> str:
 
 def repair_unbalanced_class_braces(puml: str) -> str:
     """
-    Remove extra closing braces in class diagrams that cause PlantUML to throw
+    Fix unbalanced braces in class diagrams that cause PlantUML to throw
     java.lang.IllegalStateException (Assumed diagram type: class).
 
-    The LLM sometimes emits double `}` after a class body:
-        class Foo {
-        }
-        }       ← orphaned extra brace
-
-    Strategy: walk the lines tracking brace depth.  Any `}` that would push
-    depth below zero (i.e. it has no matching opener) is dropped.
+    Handles two failure modes:
+    1. Extra `}` (orphaned closer) — the LLM emits a double `}` after a class body.
+       These are dropped.
+    2. Unclosed `{` — the last class declaration was never closed before @enduml
+       (common when the model hits max_tokens mid-class-body or puts arrows after
+       the last class without closing it first).  Missing `}` are inserted before
+       the @enduml line.
     """
     if "@startuml" not in puml:
         return puml
 
+    lines = puml.splitlines()
+
+    # Split off @enduml so we can insert closers just before it
+    enduml_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip() == "@enduml":
+            enduml_idx = i
+            break
+
+    body   = lines[:enduml_idx] if enduml_idx is not None else lines
+    tail   = lines[enduml_idx:] if enduml_idx is not None else []
+
     depth = 0
     out: List[str] = []
-    for ln in puml.splitlines():
+    for ln in body:
         stripped = ln.strip()
         opens  = stripped.count("{")
         closes = stripped.count("}")
         net    = opens - closes
 
         if net < 0 and depth + net < 0:
-            # This line has more closes than the current depth allows — drop orphans
+            # More closes than current depth — drop orphaned `}`
             to_drop = -(depth + net)
             fixed = ln
             for _ in range(to_drop):
-                # Remove the last unmatched `}` from the line
                 idx = fixed.rfind("}")
                 if idx != -1:
                     fixed = fixed[:idx] + fixed[idx+1:]
@@ -1245,7 +1262,12 @@ def repair_unbalanced_class_braces(puml: str) -> str:
             out.append(ln)
             depth = max(0, depth + net)
 
-    return "\n".join(out)
+    # Close any still-open blocks before @enduml
+    if depth > 0:
+        print(f"      [REPAIR] Inserting {depth} missing '}}' before @enduml to close unclosed class body")
+        out.extend(["}"] * depth)
+
+    return "\n".join(out + tail)
 
 
 # Element keywords that are only valid in specific diagram families.
