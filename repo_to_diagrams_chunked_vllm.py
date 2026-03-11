@@ -73,9 +73,9 @@ CONTEXT_SAFETY_MARGIN    = 64
 # --max-model-len overrides these when explicitly provided.
 # ---------------------------------------------------------------------------
 MODEL_DEFAULTS: List[Tuple[str, int]] = [
-    # Llama 4 Scout/Maverick (MoE — 10M native, 128k practical cap on 4×A100 80GB)
+    # Llama 4 Scout/Maverick (MoE — 10M native, 256k practical cap on 4×A100 80GB)
     # Use --max-model-len to push higher if your hardware allows
-    ("llama-4",          128_000),
+    ("llama-4",          262_144),
     # Llama 3.1 / 3.3 (dense 128k native)
     ("llama-3",          128_000),
     # Mistral Large 3 675B (NVFP4 quantized — 256k native)
