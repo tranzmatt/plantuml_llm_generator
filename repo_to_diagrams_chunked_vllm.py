@@ -73,19 +73,20 @@ CONTEXT_SAFETY_MARGIN    = 64
 # --max-model-len overrides these when explicitly provided.
 # ---------------------------------------------------------------------------
 MODEL_DEFAULTS: List[Tuple[str, int]] = [
-    # Llama 4 (MoE — low KV-cache cost, full 128k safe on 4×A100)
+    # Llama 4 Scout/Maverick (MoE — 10M native, 128k practical cap on 4×A100 80GB)
+    # Use --max-model-len to push higher if your hardware allows
     ("llama-4",          128_000),
-    # Llama 3.x (dense — 128k supported, KV cache is heavier)
+    # Llama 3.1 / 3.3 (dense 128k native)
     ("llama-3",          128_000),
-    # Mistral Large 3 675B (quantized, 8-GPU — supports 256k)
+    # Mistral Large 3 675B (NVFP4 quantized — 256k native)
     ("mistral-large-3",  262_144),
-    # Mistral Large 2411 123B (dense — KV cache expensive, 48k safe on 4×A100 80GB)
+    # Mistral Large 2411 123B (dense — 128k native but KV cache heavy; 48k safe on 4×A100 80GB)
     ("mistral-large",     48_000),
-    # Devstral 2 123B (code-focused, 256k context)
+    # Devstral 2 123B (code-focused dense — 256k native)
     ("devstral",         262_144),
-    # Mixtral 8x22B MoE (64k context)
+    # Mixtral 8x22B (MoE — 64k native)
     ("mixtral",           64_000),
-    # Mistral Small / Nemo (smaller dense models)
+    # Mistral Small / Nemo / other Mistral variants
     ("mistral",           32_000),
     # Qwen 2.5 / 3 (128k native)
     ("qwen",             128_000),
