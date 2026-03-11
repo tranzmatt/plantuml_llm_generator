@@ -88,10 +88,6 @@ MODEL_DEFAULTS: List[Tuple[str, int]] = [
     ("mixtral",           64_000),
     # Mistral Small / Nemo / other Mistral variants
     ("mistral",           32_000),
-    # Qwen 2.5 / 3 (128k native)
-    ("qwen",             128_000),
-    # DeepSeek (128k native)
-    ("deepseek",         128_000),
     # gpt-oss-120b (128k native)
     ("gpt-oss-120b",     128_000),
 ]
