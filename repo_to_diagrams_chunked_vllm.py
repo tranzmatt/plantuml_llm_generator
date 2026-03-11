@@ -1627,11 +1627,52 @@ def repair_undeclared_alias_edges(puml: str, diagram_type: str) -> str:
 
 
 def extract_start_end_block(raw: str) -> str:
-    m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
+    """
+    Extract the @startuml...@enduml block from raw model output.
+
+    Handles:
+    - Clean output (happy path)
+    - Markdown fences (```plantuml or ``` wrapping the block)
+    - Truncated output (model hit max_tokens before writing @enduml):
+        * Appends @enduml after stripping any incomplete trailing line
+        * Warns so the operator knows to increase --max-tokens
+    """
+    # Strip markdown code fences regardless of position.
+    # Matches ```plantuml, ```uml, ``` on their own line, plus closing ```.
+    clean = re.sub(r"^\s*```+(?:plantuml|uml)?\s*$", "", raw, flags=re.MULTILINE)
+    clean = re.sub(r"^\s*```+\s*$", "", clean, flags=re.MULTILINE)
+
+    # Happy path: complete block present
+    m = re.search(r"@startuml.*?@enduml", clean, re.DOTALL)
     if m:
         return m.group(0).strip()
-    if raw.strip():
-        return f"@startuml\n{raw.strip()}\n@enduml"
+
+    # Truncated: @startuml present but @enduml missing
+    start = re.search(r"@startuml", clean)
+    if start:
+        fragment = clean[start.start():].rstrip()
+        lines = fragment.splitlines()
+        # Drop any trailing incomplete line (e.g. 'object "Foo" as' with no alias,
+        # or 'class Bar {' that was never closed at the token boundary).
+        # A line is "incomplete" if it ends with common truncation patterns.
+        _INCOMPLETE = re.compile(
+            r"(?:"
+            r"object\s+\"[^\"]*\"\s+as\s*$"      # object "X:Y" as   ← no alias
+            r"|class\s+\w[\w.]*\s*\{?\s*$"        # class Foo {       ← open brace, no body
+            r"|\bas\s*$"                           # dangling 'as'
+            r")"
+        )
+        while lines and _INCOMPLETE.search(lines[-1].strip()):
+            lines.pop()
+        # Also strip a trailing open brace with no matching content
+        fragment = "\n".join(lines)
+        print("      [WARN] Output truncated (no @enduml found). "
+              "Diagram may be incomplete — consider raising --max-tokens.")
+        return fragment + "\n@enduml"
+
+    # No @startuml at all — wrap entire cleaned content as a best-effort
+    if clean.strip():
+        return f"@startuml\n{clean.strip()}\n@enduml"
     return ""
 
 def normalize_startuml_name(puml: str, uml_name: str) -> str:
@@ -2066,7 +2107,7 @@ def main() -> None:
                         default=int(_env_len) if _env_len else None,
                         help="Override context length. Auto-detected from model name if omitted.")
     parser.add_argument("--max-tokens",    type=int,
-                        default=int(os.environ.get("VLLM_MAX_TOKENS",  "2048")))
+                        default=int(os.environ.get("VLLM_MAX_TOKENS",  "8192")))
     parser.add_argument("--extract-tokens", type=int,
                         default=int(os.environ.get("VLLM_EXTRACT_TOKENS", "1024")),
                         help="Max tokens for Pass 1 extraction (smaller = faster, default 1024).")
