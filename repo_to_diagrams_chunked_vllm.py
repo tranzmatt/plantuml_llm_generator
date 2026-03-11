@@ -73,19 +73,20 @@ CONTEXT_SAFETY_MARGIN    = 64
 # --max-model-len overrides these when explicitly provided.
 # ---------------------------------------------------------------------------
 MODEL_DEFAULTS: List[Tuple[str, int]] = [
-    # Llama 4 (MoE — low KV-cache cost, full 128k safe on 4×A100)
+    # Llama 4 Scout/Maverick (MoE — 10M native, 128k practical cap on 4×A100 80GB)
+    # Use --max-model-len to push higher if your hardware allows
     ("llama-4",          128_000),
-    # Llama 3.x (dense — 128k supported, KV cache is heavier)
+    # Llama 3.1 / 3.3 (dense 128k native)
     ("llama-3",          128_000),
-    # Mistral Large 3 675B (quantized, 8-GPU — supports 256k)
+    # Mistral Large 3 675B (NVFP4 quantized — 256k native)
     ("mistral-large-3",  262_144),
-    # Mistral Large 2411 123B (dense — KV cache expensive, 48k safe on 4×A100 80GB)
+    # Mistral Large 2411 123B (dense — 128k native but KV cache heavy; 48k safe on 4×A100 80GB)
     ("mistral-large",     48_000),
-    # Devstral 2 123B (code-focused, 256k context)
+    # Devstral 2 123B (code-focused dense — 256k native)
     ("devstral",         262_144),
-    # Mixtral 8x22B MoE (64k context)
+    # Mixtral 8x22B (MoE — 64k native)
     ("mixtral",           64_000),
-    # Mistral Small / Nemo (smaller dense models)
+    # Mistral Small / Nemo / other Mistral variants
     ("mistral",           32_000),
     # Qwen 2.5 / 3 (128k native)
     ("qwen",             128_000),
@@ -343,6 +344,78 @@ def lint_plantuml(diagram_type: str, puml: str) -> List[str]:
 # ===========================================================================
 # vLLM helpers — model loaded ONCE, reused everywhere
 # ===========================================================================
+
+def preflight_vram_check(model: str, tp: int, gpu_memory_utilization: float) -> None:
+    """
+    Estimate whether the model's weights will fit in available VRAM before
+    attempting to load.  Uses HuggingFace safetensors metadata (no weight
+    download) + torch device queries.  Prints a warning but does NOT abort —
+    quantized or sharded models may still work even when the estimate looks
+    tight.
+    """
+    import torch
+    try:
+        from huggingface_hub import model_info as hf_model_info
+    except ImportError:
+        print("[PREFLIGHT] huggingface_hub not available, skipping VRAM check.")
+        return
+
+    # --- query physical VRAM across the TP GPUs we'll actually use ----------
+    n_gpus = torch.cuda.device_count()
+    use_gpus = min(tp, n_gpus)
+    try:
+        gpu_vram_gb = [
+            torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+            for i in range(use_gpus)
+        ]
+        total_vram_gb = sum(gpu_vram_gb)
+        gpu_desc = f"{use_gpus}×{gpu_vram_gb[0]:.0f} GiB" if gpu_vram_gb else "unknown"
+    except Exception:
+        print("[PREFLIGHT] Could not query GPU VRAM, skipping check.")
+        return
+
+    # --- fetch param count from HF safetensors metadata (no weights) --------
+    try:
+        info = hf_model_info(model)
+        st = getattr(info, "safetensors", None)
+        total_params = getattr(st, "total", None) if st else None
+    except Exception as e:
+        print(f"[PREFLIGHT] Could not fetch model info from HuggingFace ({e}), skipping check.")
+        return
+
+    if total_params is None:
+        print("[PREFLIGHT] No safetensors metadata found for this model, skipping check.")
+        return
+
+    # --- estimate weight footprint ------------------------------------------
+    # Assume bfloat16 (2 bytes) as the conservative default.
+    # FP8 / NVFP4 quantised models will be smaller; the check is intentionally
+    # pessimistic so a ✓ here means "definitely fits", not "might fit".
+    bytes_per_param = 2  # bfloat16
+    weights_gb = (total_params * bytes_per_param) / (1024 ** 3)
+
+    # vLLM allocates gpu_memory_utilization × total_vram for the engine;
+    # weights must fit within that pool.
+    usable_vram_gb = total_vram_gb * gpu_memory_utilization
+    kv_headroom_gb  = usable_vram_gb - weights_gb
+
+    print(f"[PREFLIGHT] {total_params / 1e9:.1f}B params  |  "
+          f"~{weights_gb:.1f} GiB weights (bf16)  |  "
+          f"{gpu_desc} = {total_vram_gb:.1f} GiB total  |  "
+          f"{gpu_memory_utilization:.0%} usable = {usable_vram_gb:.1f} GiB")
+
+    if kv_headroom_gb < 1.0:
+        print(f"[PREFLIGHT] ⚠ WARNING: only ~{kv_headroom_gb:.1f} GiB left for KV cache after weights. "
+              f"Model will likely OOM or have near-zero context. "
+              f"Consider a smaller model or fewer GPUs' worth of context.")
+    elif kv_headroom_gb < 8.0:
+        print(f"[PREFLIGHT] ⚠ TIGHT: ~{kv_headroom_gb:.1f} GiB for KV cache — "
+              f"max usable context will be limited. "
+              f"If this is a quantised model (FP8/NVFP4) actual headroom will be larger.")
+    else:
+        print(f"[PREFLIGHT] ✓ ~{kv_headroom_gb:.1f} GiB estimated KV cache headroom "
+              f"(assuming bf16; quantised models have more).")
+
 
 def load_model(model: str, tp: int, max_model_len: int,
                gpu_memory_utilization: float, enforce_eager: bool,
@@ -2070,6 +2143,7 @@ def main() -> None:
     # [4] Load vLLM model ONCE  ← the whole point
     # ------------------------------------------------------------------
     print(f"\n[4] Loading vLLM model (once — used for all passes)...")
+    preflight_vram_check(args.model, args.tp, args.gpu_memory_utilization)
     print(f"    {args.model}  |  tp={args.tp}  |  max_len={args.max_model_len}")
     if args.tokenizer_mode != "auto" or args.load_format != "auto":
         print(f"    tokenizer_mode={args.tokenizer_mode}  config_format={args.config_format}  load_format={args.load_format}")
