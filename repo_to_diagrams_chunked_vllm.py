@@ -275,6 +275,19 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "- Relationship arrows go on their OWN lines, never on a class declaration line.\n"
         "- Every { must have exactly one matching }. Never emit an orphaned closing }.\n"
         "- Every class/interface/enum declaration that opens a { MUST close it with } before ANY relationship arrows.\n"
+        "- Inside a package block: declare ALL classes first, THEN write ALL edges. Never interleave edges between class declarations:\n"
+        "  WRONG:\n"
+        "    package \"sys\" {\n"
+        "      class Foo { }\n"
+        "      Foo --> Bar : uses   <- edge before Bar is declared\n"
+        "      class Bar { }\n"
+        "    }\n"
+        "  CORRECT:\n"
+        "    package \"sys\" {\n"
+        "      class Foo { }\n"
+        "      class Bar { }\n"
+        "      Foo --> Bar : uses   <- all edges after all declarations\n"
+        "    }\n"
         "  WRONG:  class ImageryRouter {\n"
         "  (arrows here before } closes the body)\n"
         "  CORRECT: class ImageryRouter {\n"
@@ -330,6 +343,19 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "  CORRECT: A --> B : publishes  OR  A --> B\n"
         "Declare ALL elements before edges.\n"
         "Edges must use --> or ..> only. Never use .>.\n"
+        "\n"
+        "CRITICAL — package block containment:\n"
+        "  Components placed inside a package MUST be declared inside its { } block.\n"
+        "  NEVER list bare aliases inside a package after declaring them outside:\n"
+        "  WRONG:\n"
+        "    component \"FastAPI App\" as fastapi_app   <- declared outside\n"
+        "    package \"Services\" {\n"
+        "      fastapi_app                              <- bare alias reference, INVALID\n"
+        "    }\n"
+        "  CORRECT:\n"
+        "    package \"Services\" {\n"
+        "      component \"FastAPI App\" as fastapi_app  <- declared inside\n"
+        "    }\n"
         "Never create new keywords like exchange or topic.\n"
         "Represent messaging exchanges as stereotypes:\n"
         'queue "celebrity_names" <<exchange>>\n'
@@ -1925,6 +1951,79 @@ def repair_dotted_class_names(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_interleaved_edges_in_packages(puml: str) -> str:
+    """
+    Fix class diagrams where the model interleaves edge/arrow lines between class
+    declarations inside a package block.
+
+    PlantUML tolerates some interleaving but it causes rendering issues and
+    occasionally syntax errors, especially when edges reference classes declared
+    later in the same block.
+
+    Strategy: for each package block, collect any edge lines (lines containing
+    --> <|-- *-- o-- ..> etc.) and move them to after the last declaration in
+    the block, just before the closing }.
+
+    Also drops clearly garbled edge targets — lines matching:
+        identifier --> Word identifier   (unquoted multi-word rhs starting with capital)
+    where the rhs is not a known declared name.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    EDGE_RE = re.compile(
+        r'^\s*\S+\s*('
+        r'-->|<--|<-->|\.\.|\.\.>|<\.\.|'
+        r'\*--|o--|<\|--|--\|>|\.\.\|>'
+        r')\s*\S+'
+    )
+    # Garbled: "word Word word" style rhs — capitalised word followed by identifier
+    GARBLED_RE = re.compile(r'-->\s+[A-Z][a-z]+\s+\w')
+
+    lines = puml.splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        stripped = ln.strip()
+
+        # Detect package/namespace block opening
+        if re.match(r'\s*(package|namespace)\s+', ln) and '{' in ln:
+            block_decls = [ln]
+            block_edges = []
+            depth = ln.count('{') - ln.count('}')
+            i += 1
+            while i < len(lines) and depth > 0:
+                bl = lines[i]
+                bs = bl.strip()
+                depth += bs.count('{') - bs.count('}')
+                if depth == 0:
+                    # closing brace — flush edges then close
+                    block_edges_filtered = []
+                    for el in block_edges:
+                        if GARBLED_RE.search(el):
+                            print(f"      [REPAIR] Dropped garbled edge inside package: {el.strip()!r}")
+                        else:
+                            block_edges_filtered.append(el)
+                    block_decls.extend(block_edges_filtered)
+                    block_decls.append(bl)
+                elif EDGE_RE.match(bl):
+                    block_edges.append(bl)
+                else:
+                    block_decls.append(bl)
+                i += 1
+            out.extend(block_decls)
+        else:
+            # Outside package blocks, drop garbled edges too
+            if EDGE_RE.match(ln) and GARBLED_RE.search(ln):
+                print(f"      [REPAIR] Dropped garbled edge: {ln.strip()!r}")
+            else:
+                out.append(ln)
+            i += 1
+
+    return "\n".join(out)
+
+
 def repair_undeclared_alias_edges(puml: str, diagram_type: str) -> str:
     """
     Remove edge lines that reference an alias which was never declared.
@@ -2395,11 +2494,12 @@ def pass3_generate_all(
             puml = repair_truncated_activity(puml)
         if dtype == "class":
             puml = repair_dotted_class_names(puml)
+            puml = repair_interleaved_edges_in_packages(puml)
             puml = repair_class_diagram_lines(puml)
             puml = repair_unbalanced_class_braces(puml)
         if dtype == "state":
             puml = repair_quoted_state_targets(puml)
-        if dtype == "usecase":
+        if dtype in ("usecase", "component", "deployment"):
             puml = repair_usecase_rectangle_body(puml)
         if dtype == "object":
             puml = repair_forward_referenced_objects(puml)
@@ -2440,11 +2540,12 @@ def pass3_generate_all(
                 repaired = repair_truncated_activity(repaired)
             if dtype == "class":
                 repaired = repair_dotted_class_names(repaired)
+                repaired = repair_interleaved_edges_in_packages(repaired)
                 repaired = repair_class_diagram_lines(repaired)
                 repaired = repair_unbalanced_class_braces(repaired)
             if dtype == "state":
                 repaired = repair_quoted_state_targets(repaired)
-            if dtype == "usecase":
+            if dtype in ("usecase", "component", "deployment"):
                 repaired = repair_usecase_rectangle_body(repaired)
             if dtype == "object":
                 repaired = repair_forward_referenced_objects(repaired)
