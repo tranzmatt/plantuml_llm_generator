@@ -219,6 +219,25 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "  UC1 ..> UC3 : <<extend>>\n"
         "  Actor --|> GeneralActor    (actor generalisation)\n"
         "\n"
+        "\n"
+        "CRITICAL — rectangle/package containment:\n"
+        "  Usecases placed inside a rectangle MUST be declared inside its { } block, not outside.\n"
+        "  WRONG:\n"
+        "    usecase \"Detect Autopilot\" as detect_autopilot   ← declared outside\n"
+        "    rectangle \"System\" as sys {\n"
+        "      detect_autopilot                                  ← bare alias reference — INVALID\n"
+        "    }\n"
+        "  CORRECT:\n"
+        "    rectangle \"System\" as sys {\n"
+        "      usecase \"Detect Autopilot\" as detect_autopilot  ← declared inside\n"
+        "    }\n"
+        "\n"
+        "CRITICAL — actor→usecase arrows use --> not --|>:\n"
+        "  --|>  means actor generalisation (actor inherits from actor) — NEVER use for actor→usecase\n"
+        "  WRONG:   user --|> detect_autopilot : <<trigger>>\n"
+        "  CORRECT: user --> detect_autopilot : <<trigger>>\n"
+        "  Actor generalisation (actor extends actor): UserAdmin --|> User\n"
+        "\n"
         "BRACE DISCIPLINE: every { must have exactly one matching }.\n"
         "Write ALL declarations and close ALL { } blocks BEFORE writing any edges."
     ),
@@ -1762,6 +1781,79 @@ def repair_orphan_activity_keywords(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_usecase_rectangle_body(puml: str) -> str:
+    """
+    Fix two common usecase diagram mistakes:
+
+    1. Bare alias references inside rectangle/package blocks.
+       PlantUML does not allow referencing pre-declared aliases inside a { } block.
+       The model often declares usecases at the top level, then tries to "place" them
+       inside a rectangle by listing their aliases:
+
+         WRONG:
+           usecase "Detect Autopilot" as detect_autopilot
+           rectangle "System" as sys {
+             detect_autopilot          ← bare alias reference — syntax error
+           }
+
+       Fix: move the usecase declarations inside the block and remove the top-level
+       declarations, OR if the block only contains bare references with no other
+       content, just remove the bare-reference lines (leaving declarations at top level).
+
+       We take the simpler safe approach: remove bare identifier lines inside blocks
+       (they are redundant since the usecase is already declared).
+
+    2. Actor→usecase arrows using --|> (generalisation) instead of --> (association).
+       --|> between an actor and a usecase is semantically wrong and renders badly.
+
+         WRONG:   user --|> detect_autopilot : <<trigger>>
+         CORRECT: user --> detect_autopilot : <<trigger>>
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    lines = puml.splitlines()
+
+    # Collect declared aliases so we can detect bare references
+    declared_aliases: set = set()
+    DECL_RE = re.compile(r'\bas\s+(\w+)', re.IGNORECASE)
+    for ln in lines:
+        for m in DECL_RE.finditer(ln):
+            declared_aliases.add(m.group(1))
+
+    # Fix bare alias references inside blocks and wrong arrows
+    depth = 0
+    out = []
+    for ln in lines:
+        stripped = ln.strip()
+
+        # Track brace depth
+        depth += stripped.count('{') - stripped.count('}')
+
+        # Fix 1: bare alias reference inside a block
+        if depth > 0 and stripped in declared_aliases:
+            print(f"      [REPAIR] Removed bare alias reference inside block: {stripped!r}")
+            continue
+
+        # Fix 2: actor→usecase --|> should be -->
+        # Match lines like:  alias --|> other_alias : <<something>>
+        # but NOT pure actor generalisation (actor --|> actor)
+        fixed = re.sub(
+            r'(\w+)\s+--\|>\s+(\w+)(\s*:.*)?$',
+            lambda m: (
+                f"{m.group(1)} --> {m.group(2)}{m.group(3) or ''}"
+                if m.group(3) and '<<' in m.group(3)  # has stereotype → association, not generalisation
+                else m.group(0)  # no stereotype → leave as-is (may be genuine generalisation)
+            ),
+            ln
+        )
+        if fixed != ln:
+            print(f"      [REPAIR] usecase: --|> with stereotype changed to -->: {ln.strip()!r}")
+        out.append(fixed)
+
+    return "\n".join(out)
+
+
 def repair_undeclared_alias_edges(puml: str, diagram_type: str) -> str:
     """
     Remove edge lines that reference an alias which was never declared.
@@ -2235,6 +2327,8 @@ def pass3_generate_all(
             puml = repair_unbalanced_class_braces(puml)
         if dtype == "state":
             puml = repair_quoted_state_targets(puml)
+        if dtype == "usecase":
+            puml = repair_usecase_rectangle_body(puml)
         if dtype == "object":
             puml = repair_forward_referenced_objects(puml)
         results[dtype] = puml
@@ -2277,6 +2371,8 @@ def pass3_generate_all(
                 repaired = repair_unbalanced_class_braces(repaired)
             if dtype == "state":
                 repaired = repair_quoted_state_targets(repaired)
+            if dtype == "usecase":
+                repaired = repair_usecase_rectangle_body(repaired)
             if dtype == "object":
                 repaired = repair_forward_referenced_objects(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
