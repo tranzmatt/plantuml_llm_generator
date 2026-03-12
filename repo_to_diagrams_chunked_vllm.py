@@ -846,9 +846,37 @@ def get_rag_examples(
 # File collection
 # ===========================================================================
 
+
+# Directory names that are never part of a project's source code.
+_SKIP_DIRS: frozenset = frozenset({
+    # Virtual environments
+    "venv", ".venv", "env", ".env", "virtualenv",
+    "pyenv", ".pyenv", "conda-env",
+    # Package/build artefacts
+    "site-packages", "dist-packages",
+    "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache",
+    "build", "dist", "*.egg-info",
+    # VCS / tooling
+    ".git", ".hg", ".svn", ".tox",
+    # JS / Node (common in full-stack repos)
+    "node_modules",
+    # IDE
+    ".idea", ".vscode",
+})
+
+def _is_skipped_dir(dirname: str) -> bool:
+    """Return True if this directory should be excluded from analysis."""
+    return (
+        dirname in _SKIP_DIRS
+        or dirname.endswith(".egg-info")
+        or dirname.endswith(".dist-info")
+    )
+
 def collect_files(root: str) -> List[Tuple[str, str]]:
     result = []
-    for dirpath, _, fnames in os.walk(root):
+    for dirpath, dirnames, fnames in os.walk(root):
+        # Prune skip-dirs in-place so os.walk won't descend into them
+        dirnames[:] = [d for d in dirnames if not _is_skipped_dir(d)]
         for fname in sorted(fnames):
             if not fname.endswith(".py"):
                 continue
