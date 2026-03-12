@@ -964,7 +964,10 @@ GENERATION_SYSTEM = (
     "NAME SANITISATION:\n"
     "- File paths and names containing  /  must be replaced with  _  before use.\n"
     "- CORRECT: participant \"ui_server.py\" as server\n"
-    "- WRONG:   participant \"ui/server.py\" as server\n\n"
+    "- WRONG:   participant \"ui/server.py\" as server\n"
+    "- Class/type names containing  .  (Python module paths) must replace  .  with  _ :\n"
+    "  WRONG:  class routers.utils {   or   class.v1 {\n"
+    "  CORRECT: class routers_utils {  or   class routers_v1 {\n\n"
 
     "If any generated line violates these rules, rewrite it before output."
 )
@@ -1854,6 +1857,74 @@ def repair_usecase_rectangle_body(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_dotted_class_names(puml: str) -> str:
+    """
+    Fix class names that contain dots, which PlantUML either misparses or rejects.
+
+    Two failure modes:
+    1. Bare keyword collision:  class.v1 {
+       The model dropped the prefix, leaving the `class` keyword directly touching
+       a dot -- PlantUML sees keyword + attribute accessor, not a class name.
+       Fix: replace the dot with underscore -> class_v1 {
+
+    2. Dotted module paths used as class names:  class routers.utils {
+       PlantUML treats the dot as a namespace separator which can cause rendering
+       issues and syntax errors inside package blocks.
+       Fix: replace all dots in the name with underscores -> class routers_utils {
+
+    Both fixes also rewrite any subsequent references to the old dotted name.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    lines = puml.splitlines()
+
+    CLASS_DECL = re.compile(
+        r'^(\s*(?:abstract\s+)?class)'
+        r'(\.\w[\w.]*|\s+\w[\w.]*\.\w[\w.]*)'
+        r'(\s*(?:as\s+\w+)?\s*(?:\{.*)?)?$',
+        re.IGNORECASE
+    )
+
+    renames: dict = {}
+    for ln in lines:
+        m = CLASS_DECL.match(ln)
+        if m:
+            raw = m.group(2).strip()
+            if raw.startswith('.'):
+                old_name = raw[1:]
+                new_name = old_name.replace('.', '_')
+            else:
+                old_name = raw
+                new_name = raw.replace('.', '_')
+            if old_name != new_name:
+                renames[old_name] = new_name
+                print(f"      [REPAIR] dotted class name: {old_name!r} -> {new_name!r}")
+
+    if not renames:
+        return puml
+
+    out = []
+    for ln in lines:
+        m = CLASS_DECL.match(ln)
+        if m:
+            raw = m.group(2).strip()
+            if raw.startswith('.'):
+                old_name = raw[1:]
+                new_name = renames.get(old_name, old_name)
+                out.append(m.group(1) + ' ' + new_name + (m.group(3) or ''))
+                continue
+            elif raw in renames:
+                out.append(m.group(1) + ' ' + renames[raw] + (m.group(3) or ''))
+                continue
+        fixed = ln
+        for old, new in renames.items():
+            fixed = re.sub(r'(?<![\w.])' + re.escape(old) + r'(?![\w])', new, fixed)
+        out.append(fixed)
+
+    return "\n".join(out)
+
+
 def repair_undeclared_alias_edges(puml: str, diagram_type: str) -> str:
     """
     Remove edge lines that reference an alias which was never declared.
@@ -2323,6 +2394,7 @@ def pass3_generate_all(
             puml = repair_orphan_activity_keywords(puml)
             puml = repair_truncated_activity(puml)
         if dtype == "class":
+            puml = repair_dotted_class_names(puml)
             puml = repair_class_diagram_lines(puml)
             puml = repair_unbalanced_class_braces(puml)
         if dtype == "state":
@@ -2367,6 +2439,7 @@ def pass3_generate_all(
                 repaired = repair_orphan_activity_keywords(repaired)
                 repaired = repair_truncated_activity(repaired)
             if dtype == "class":
+                repaired = repair_dotted_class_names(repaired)
                 repaired = repair_class_diagram_lines(repaired)
                 repaired = repair_unbalanced_class_braces(repaired)
             if dtype == "state":
