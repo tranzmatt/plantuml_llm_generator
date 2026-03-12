@@ -36,11 +36,16 @@ os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD",  "spawn")
 import json, re, sys, argparse
 from typing import Dict, List, Optional, Tuple
 
+import torch
 import faiss
 import numpy as np
 import requests
 from sentence_transformers import SentenceTransformer
 from vllm import LLM, SamplingParams
+
+# Enable TF32 for float32 matmuls on Ampere/Ada/Hopper GPUs (A100, RTX 6000 Ada, H100…).
+# Gives a meaningful throughput boost with negligible precision loss.
+torch.set_float32_matmul_precision("high")
 
 # ---------------------------------------------------------------------------
 # Diagram catalogue
@@ -73,9 +78,9 @@ CONTEXT_SAFETY_MARGIN    = 64
 # --max-model-len overrides these when explicitly provided.
 # ---------------------------------------------------------------------------
 MODEL_DEFAULTS: List[Tuple[str, int]] = [
-    # Llama 4 Scout/Maverick (MoE — 10M native, 128k practical cap on 4×A100 80GB)
+    # Llama 4 Scout/Maverick (MoE — 10M native, 256k practical cap on 4×A100 80GB)
     # Use --max-model-len to push higher if your hardware allows
-    ("llama-4",          128_000),
+    ("llama-4",          256_000),
     # Llama 3.1 / 3.3 (dense 128k native)
     ("llama-3",          128_000),
     # Mistral Large 3 675B (NVFP4 quantized — 256k native)
@@ -88,10 +93,6 @@ MODEL_DEFAULTS: List[Tuple[str, int]] = [
     ("mixtral",           64_000),
     # Mistral Small / Nemo / other Mistral variants
     ("mistral",           32_000),
-    # Qwen 2.5 / 3 (128k native)
-    ("qwen",             128_000),
-    # DeepSeek (128k native)
-    ("deepseek",         128_000),
     # gpt-oss-120b (128k native)
     ("gpt-oss-120b",     128_000),
 ]
@@ -127,13 +128,77 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "  repeat → repeat while\n"
         "NEVER write endwhile unless there is a matching while above it.\n"
         "NEVER write endif unless there is a matching if above it.\n"
-        "A fork block ends with 'end fork', not 'endwhile' or 'end'."
+        "A fork block ends with 'end fork', not 'endwhile' or 'end'.\n"
+        "\n"
+        "repeat/repeat while:\n"
+        "  repeat\n"
+        "    :action;\n"
+        "  repeat while (condition?) is (yes) not (no)\n"
+        "\n"
+        "Swimlanes (partition):\n"
+        "  partition \"Service A\" {\n"
+        "    :action;\n"
+        "  }\n"
+        "\n"
+        "Notes:\n"
+        "  note left: text\n"
+        "  note right: text\n"
+        "\n"
+        "Hard constraints:\n"
+        "- NEVER use (*) --> or --> (*) legacy transition syntax.\n"
+        "- Every action line starts with : and ends with ; — never omit either.\n"
+        "- detach and kill are valid terminators instead of stop."
     ),
     "state": (
-        "Correct transition syntax: StateName --> OtherState : label\n"
-        "NEVER write -->|label| — that is Mermaid and will fail.\n"
-        "Composite states: state StateName { [*] --> SubState }\n"
-        "Entry/exit use [*]."
+        "ALLOWED elements: state, note, skinparam, hide/show.\n"
+        "NEVER use: participant, class, component, node, actor, object.\n"
+        "\n"
+        "Transition syntax:\n"
+        "  Correct:  StateName --> OtherState : label\n"
+        "  WRONG:    -->|label|  (that is Mermaid syntax — will fail in PlantUML)\n"
+        "\n"
+        "State declaration:\n"
+        "  Named state:    state \"Display Name\" as alias\n"
+        "  Composite:      state \"Display Name\" as alias {\n"
+        "                    [*] --> SubState\n"
+        "                  }\n"
+        "  Inline (simple): [*] --> Idle  (Idle is created implicitly — no quotes needed)\n"
+        "\n"
+        "CRITICAL — transition targets must be plain identifiers or declared aliases. NEVER quoted strings:\n"
+        "  WRONG:   [*] --> \"Initializing\"\n"
+        "  CORRECT: [*] --> Initializing           (plain identifier, implicitly declared)\n"
+        "  CORRECT: state \"Initializing\" as init  then  [*] --> init\n"
+        "\n"
+        "Aliases must be plain identifiers — NEVER quote an alias:\n"
+        "  WRONG:  state \"Idle\" as \"Idle\"\n"
+        "  CORRECT: state \"Idle\" as idle\n"
+        "\n"
+        "Entry/exit points use [*]:\n"
+        "  [*] --> FirstState   (entry)\n"
+        "  LastState --> [*]    (exit)\n"
+        "\n"
+        "Concurrent (orthogonal) states — use -- as separator inside a composite state:\n"
+        "  state \"Processing\" as processing {\n"
+        "    state \"Receiving\" as receiving\n"
+        "    --\n"
+        "    state \"Sending\" as sending\n"
+        "  }\n"
+        "\n"
+        "Pseudostate stereotypes (optional, for clarity):\n"
+        "  state choice1 <<choice>>\n"
+        "  state fork1   <<fork>>\n"
+        "  state join1   <<join>>\n"
+        "  state end1    <<end>>\n"
+        "\n"
+        "Notes:\n"
+        "  note on link : text   (annotates the preceding transition)\n"
+        "  note left of StateName : text\n"
+        "  note right of StateName : text\n"
+        "\n"
+        "Hard constraints:\n"
+        "- Transition endpoints are identifiers only — NEVER quoted strings.\n"
+        "- Declare composite state blocks before referencing their children in transitions.\n"
+        "- Every { must have exactly one matching }. Close state blocks before writing transitions."
     ),
     "usecase": (
         "ALLOWED elements: actor, usecase, rectangle, package, note.\n"
@@ -148,6 +213,31 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "  WRONG:  rectangle \"Imagery Pipeline\" { }  ...then later...  foo --> imagery_pipeline\n"
         "  CORRECT: rectangle \"Imagery Pipeline\" as imagery_pipeline { }\n"
         "Never reference an alias in an edge that was not explicitly declared with 'as'.\n"
+        "\n"
+        "Include/extend relationships (use dotted arrow with stereotype):\n"
+        "  UC1 ..> UC2 : <<include>>\n"
+        "  UC1 ..> UC3 : <<extend>>\n"
+        "  Actor --|> GeneralActor    (actor generalisation)\n"
+        "\n"
+        "\n"
+        "CRITICAL — rectangle/package containment:\n"
+        "  Usecases placed inside a rectangle MUST be declared inside its { } block, not outside.\n"
+        "  WRONG:\n"
+        "    usecase \"Detect Autopilot\" as detect_autopilot   ← declared outside\n"
+        "    rectangle \"System\" as sys {\n"
+        "      detect_autopilot                                  ← bare alias reference — INVALID\n"
+        "    }\n"
+        "  CORRECT:\n"
+        "    rectangle \"System\" as sys {\n"
+        "      usecase \"Detect Autopilot\" as detect_autopilot  ← declared inside\n"
+        "    }\n"
+        "\n"
+        "CRITICAL — actor→usecase arrows use --> not --|>:\n"
+        "  --|>  means actor generalisation (actor inherits from actor) — NEVER use for actor→usecase\n"
+        "  WRONG:   user --|> detect_autopilot : <<trigger>>\n"
+        "  CORRECT: user --> detect_autopilot : <<trigger>>\n"
+        "  Actor generalisation (actor extends actor): UserAdmin --|> User\n"
+        "\n"
         "BRACE DISCIPLINE: every { must have exactly one matching }.\n"
         "Write ALL declarations and close ALL { } blocks BEFORE writing any edges."
     ),
@@ -175,10 +265,34 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Aggregation:  ClassA o-- ClassB\n"
         "Association:  ClassA --> ClassB\n"
         "Members: + public, - private, # protected\n"
+        "Modifiers: {abstract}, {static} — place after method/field name:\n"
+        "  + run() {abstract}\n"
+        "  + instance : Foo {static}\n"
+        "Suppress empty bodies: hide empty members\n"
+        "Generics: class Foo<T>\n"
         "Hard constraints:\n"
         "- Do not mix other diagram element families here (no component/queue/node/participant/object).\n"
         "- Relationship arrows go on their OWN lines, never on a class declaration line.\n"
-        "- Every { must have exactly one matching }. Never emit an orphaned closing }."
+        "- Every { must have exactly one matching }. Never emit an orphaned closing }.\n"
+        "- Every class/interface/enum declaration that opens a { MUST close it with } before ANY relationship arrows.\n"
+        "- Inside a package block: declare ALL classes first, THEN write ALL edges. Never interleave edges between class declarations:\n"
+        "  WRONG:\n"
+        "    package \"sys\" {\n"
+        "      class Foo { }\n"
+        "      Foo --> Bar : uses   <- edge before Bar is declared\n"
+        "      class Bar { }\n"
+        "    }\n"
+        "  CORRECT:\n"
+        "    package \"sys\" {\n"
+        "      class Foo { }\n"
+        "      class Bar { }\n"
+        "      Foo --> Bar : uses   <- all edges after all declarations\n"
+        "    }\n"
+        "  WRONG:  class ImageryRouter {\n"
+        "  (arrows here before } closes the body)\n"
+        "  CORRECT: class ImageryRouter {\n"
+        "           }\n"
+        "           Child <|-- Parent"
     ),
     "sequence": (
         "ALLOWED elements: participant, actor, boundary, control, entity, database, collections.\n"
@@ -195,9 +309,26 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "File paths: replace / with _ in display names:\n"
         "  WRONG:  participant \"ui/server.py\"\n"
         "  CORRECT: participant \"ui_server.py\" as server\n"
+        "Notes:\n"
+        "  note left of Alice : text\n"
+        "  note right of Bob : text\n"
+        "  note over Alice, Bob : text   (spans multiple participants)\n"
+        "  note left: text               (shorthand for last participant)\n"
+        "\n"
+        "Grouping:\n"
+        "  box \"External Systems\" #LightBlue\n"
+        "    participant X\n"
+        "  end box\n"
+        "\n"
+        "Dividers and delays:\n"
+        "  == Phase 1 ==           (section separator)\n"
+        "  ...                     (delay)\n"
+        "  ... 5 minutes later ... (labelled delay)\n"
+        "\n"
         "Hard constraints:\n"
         "- Every participant referenced in a message must be declared before messages.\n"
-        "- If a participant name contains spaces, quote it and/or use an alias; message endpoints should be aliases."
+        "- If a participant name contains spaces, quote it and/or use an alias; message endpoints should be aliases.\n"
+        "- Message arrows must have a label or omit the colon: WRONG  A -> B :   CORRECT  A -> B : call  or  A -> B"
     ),
     "component": (
         "ALLOWED elements: component, interface, queue, database, cloud, artifact, node, package, rectangle.\n"
@@ -212,13 +343,36 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "  CORRECT: A --> B : publishes  OR  A --> B\n"
         "Declare ALL elements before edges.\n"
         "Edges must use --> or ..> only. Never use .>.\n"
+        "\n"
+        "CRITICAL — package block containment:\n"
+        "  Components placed inside a package MUST be declared inside its { } block.\n"
+        "  NEVER list bare aliases inside a package after declaring them outside:\n"
+        "  WRONG:\n"
+        "    component \"FastAPI App\" as fastapi_app   <- declared outside\n"
+        "    package \"Services\" {\n"
+        "      fastapi_app                              <- bare alias reference, INVALID\n"
+        "    }\n"
+        "  CORRECT:\n"
+        "    package \"Services\" {\n"
+        "      component \"FastAPI App\" as fastapi_app  <- declared inside\n"
+        "    }\n"
         "Never create new keywords like exchange or topic.\n"
         "Represent messaging exchanges as stereotypes:\n"
         'queue "celebrity_names" <<exchange>>\n'
+        "Package/frame nesting:\n"
+        "  package \"Group\" {\n"
+        "    component \"A\" as a\n"
+        "    component \"B\" as b\n"
+        "  }\n"
+        "Interface notation (both forms valid):\n"
+        "  interface \"IFoo\" as ifoo\n"
+        "  () \"IFoo\" as ifoo\n"
+        "\n"
         "Hard constraints:\n"
         "- Do NOT define/alias an element inline inside a link line.\n"
         "- One edge per line. Do NOT use comma-separated targets.\n"
-        "- Do not mix other diagram element families (e.g., class/object/participant)."
+        "- Do not mix other diagram element families (e.g., class/object/participant).\n"
+        "- Close ALL package/frame/node { } blocks before writing edges."
     ),
     "deployment": (
         "ALLOWED elements: node, component, artifact, database, cloud, queue, package.\n"
@@ -228,10 +382,18 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "  WRONG:  node \"MongoDB Cluster\" as \"Mongo Cluster\"\n"
         "  CORRECT: node \"MongoDB Cluster\" as Mongo_Cluster\n"
         "Write ALL node/component declarations and close ALL { } blocks BEFORE writing edges.\n"
+        "Additional container types: frame, stack, rectangle (all support { } nesting).\n"
+        "  frame \"Kubernetes Cluster\" {\n"
+        "    node \"Pod A\" as pod_a {\n"
+        "      component \"App\" as app\n"
+        "    }\n"
+        "  }\n"
+        "\n"
         "Hard constraints:\n"
         "- There is no `exchange` keyword. Represent exchanges as artifact or component with label.\n"
         "- Do NOT define/alias an element inline inside a link line. Declare first, then connect.\n"
-        "- One edge per line. Do NOT use comma-separated targets."
+        "- One edge per line. Do NOT use comma-separated targets.\n"
+        "- ALL nested { } blocks must be fully closed before any edge lines."
     ),
     "object": (
         "ALLOWED elements: object, note.\n"
@@ -246,6 +408,17 @@ DIAGRAM_SYNTAX_HINTS: Dict[str, str] = {
         "Aliases must be plain identifiers — NEVER quote an alias:\n"
         "  WRONG:  object \"config:ConfigParser\" as \"config\"\n"
         "  CORRECT: object \"config:ConfigParser\" as config\n"
+        "Field value syntax:\n"
+        "  alias : field = value           (bare value)\n"
+        "  alias : name = \"John Doe\"      (quoted string value)\n"
+        "  alias : count = 42\n"
+        "\n"
+        "Map objects (key/value display):\n"
+        "  map \"Config\" as cfg {\n"
+        "    host => localhost\n"
+        "    port => 8080\n"
+        "  }\n"
+        "\n"
         "Links: o1 --> o2 : label  or  o1 *-- o2"
     ),
 }
@@ -344,6 +517,77 @@ def lint_plantuml(diagram_type: str, puml: str) -> List[str]:
 # ===========================================================================
 # vLLM helpers — model loaded ONCE, reused everywhere
 # ===========================================================================
+
+def preflight_vram_check(model: str, tp: int, gpu_memory_utilization: float) -> None:
+    """
+    Estimate whether the model's weights will fit in available VRAM before
+    attempting to load.  Uses HuggingFace safetensors metadata (no weight
+    download) + torch device queries.  Prints a warning but does NOT abort —
+    quantized or sharded models may still work even when the estimate looks
+    tight.
+    """
+    try:
+        from huggingface_hub import model_info as hf_model_info
+    except ImportError:
+        print("[PREFLIGHT] huggingface_hub not available, skipping VRAM check.")
+        return
+
+    # --- query physical VRAM across the TP GPUs we'll actually use ----------
+    n_gpus = torch.cuda.device_count()
+    use_gpus = min(tp, n_gpus)
+    try:
+        gpu_vram_gb = [
+            torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+            for i in range(use_gpus)
+        ]
+        total_vram_gb = sum(gpu_vram_gb)
+        gpu_desc = f"{use_gpus}×{gpu_vram_gb[0]:.0f} GiB" if gpu_vram_gb else "unknown"
+    except Exception:
+        print("[PREFLIGHT] Could not query GPU VRAM, skipping check.")
+        return
+
+    # --- fetch param count from HF safetensors metadata (no weights) --------
+    try:
+        info = hf_model_info(model)
+        st = getattr(info, "safetensors", None)
+        total_params = getattr(st, "total", None) if st else None
+    except Exception as e:
+        print(f"[PREFLIGHT] Could not fetch model info from HuggingFace ({e}), skipping check.")
+        return
+
+    if total_params is None:
+        print("[PREFLIGHT] No safetensors metadata found for this model, skipping check.")
+        return
+
+    # --- estimate weight footprint ------------------------------------------
+    # Assume bfloat16 (2 bytes) as the conservative default.
+    # FP8 / NVFP4 quantised models will be smaller; the check is intentionally
+    # pessimistic so a ✓ here means "definitely fits", not "might fit".
+    bytes_per_param = 2  # bfloat16
+    weights_gb = (total_params * bytes_per_param) / (1024 ** 3)
+
+    # vLLM allocates gpu_memory_utilization × total_vram for the engine;
+    # weights must fit within that pool.
+    usable_vram_gb = total_vram_gb * gpu_memory_utilization
+    kv_headroom_gb  = usable_vram_gb - weights_gb
+
+    print(f"[PREFLIGHT] {total_params / 1e9:.1f}B params  |  "
+          f"~{weights_gb:.1f} GiB weights (bf16)  |  "
+          f"{gpu_desc} = {total_vram_gb:.1f} GiB total  |  "
+          f"{gpu_memory_utilization:.0%} usable = {usable_vram_gb:.1f} GiB")
+
+    if kv_headroom_gb < 1.0:
+        print(f"[PREFLIGHT] ⚠ WARNING: only ~{kv_headroom_gb:.1f} GiB left for KV cache after weights. "
+              f"Model will likely OOM or have near-zero context. "
+              f"Consider a smaller model or fewer GPUs' worth of context.")
+    elif kv_headroom_gb < 8.0:
+        print(f"[PREFLIGHT] ⚠ TIGHT: ~{kv_headroom_gb:.1f} GiB for KV cache — "
+              f"max usable context will be limited. "
+              f"If this is a quantised model (FP8/NVFP4) actual headroom will be larger.")
+    else:
+        print(f"[PREFLIGHT] ✓ ~{kv_headroom_gb:.1f} GiB estimated KV cache headroom "
+              f"(assuming bf16; quantised models have more).")
+
 
 def load_model(model: str, tp: int, max_model_len: int,
                gpu_memory_utilization: float, enforce_eager: bool,
@@ -602,9 +846,37 @@ def get_rag_examples(
 # File collection
 # ===========================================================================
 
+
+# Directory names that are never part of a project's source code.
+_SKIP_DIRS: frozenset = frozenset({
+    # Virtual environments
+    "venv", ".venv", "env", ".env", "virtualenv",
+    "pyenv", ".pyenv", "conda-env",
+    # Package/build artefacts
+    "site-packages", "dist-packages",
+    "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache",
+    "build", "dist", "*.egg-info",
+    # VCS / tooling
+    ".git", ".hg", ".svn", ".tox",
+    # JS / Node (common in full-stack repos)
+    "node_modules",
+    # IDE
+    ".idea", ".vscode",
+})
+
+def _is_skipped_dir(dirname: str) -> bool:
+    """Return True if this directory should be excluded from analysis."""
+    return (
+        dirname in _SKIP_DIRS
+        or dirname.endswith(".egg-info")
+        or dirname.endswith(".dist-info")
+    )
+
 def collect_files(root: str) -> List[Tuple[str, str]]:
     result = []
-    for dirpath, _, fnames in os.walk(root):
+    for dirpath, dirnames, fnames in os.walk(root):
+        # Prune skip-dirs in-place so os.walk won't descend into them
+        dirnames[:] = [d for d in dirnames if not _is_skipped_dir(d)]
         for fname in sorted(fnames):
             if not fname.endswith(".py"):
                 continue
@@ -701,7 +973,8 @@ GENERATION_SYSTEM = (
 
     "STRICT PLANTUML 1.2025.10 SYNTAX RULES:\n"
     "- Activity: modern syntax only (start/stop/:action;/fork). NEVER (*) -->.\n"
-    "- State: transitions use '--> State : label'. NEVER -->|label|.\n"
+    "- State: transitions use 'StateName --> OtherState : label'. NEVER -->|label| (Mermaid).\n"
+    "- State: transition targets MUST be plain identifiers. NEVER quoted strings: WRONG [*] --> \"Idle\"  CORRECT [*] --> Idle\n"
     "- Use case/component/deployment: ALL multi-word names must be double-quoted.\n"
     "- Class: <|-- inherit, *-- compose, o-- aggregate, --> associate.\n"
     "- Sequence: declare all participants before first arrow.\n\n"
@@ -745,7 +1018,10 @@ GENERATION_SYSTEM = (
     "NAME SANITISATION:\n"
     "- File paths and names containing  /  must be replaced with  _  before use.\n"
     "- CORRECT: participant \"ui_server.py\" as server\n"
-    "- WRONG:   participant \"ui/server.py\" as server\n\n"
+    "- WRONG:   participant \"ui/server.py\" as server\n"
+    "- Class/type names containing  .  (Python module paths) must replace  .  with  _ :\n"
+    "  WRONG:  class routers.utils {   or   class.v1 {\n"
+    "  CORRECT: class routers_utils {  or   class routers_v1 {\n\n"
 
     "If any generated line violates these rules, rewrite it before output."
 )
@@ -1132,34 +1408,45 @@ def repair_slash_names(puml: str) -> str:
 
 def repair_unbalanced_class_braces(puml: str) -> str:
     """
-    Remove extra closing braces in class diagrams that cause PlantUML to throw
+    Fix unbalanced braces in class diagrams that cause PlantUML to throw
     java.lang.IllegalStateException (Assumed diagram type: class).
 
-    The LLM sometimes emits double `}` after a class body:
-        class Foo {
-        }
-        }       ← orphaned extra brace
-
-    Strategy: walk the lines tracking brace depth.  Any `}` that would push
-    depth below zero (i.e. it has no matching opener) is dropped.
+    Handles two failure modes:
+    1. Extra `}` (orphaned closer) — the LLM emits a double `}` after a class body.
+       These are dropped.
+    2. Unclosed `{` — the last class declaration was never closed before @enduml
+       (common when the model hits max_tokens mid-class-body or puts arrows after
+       the last class without closing it first).  Missing `}` are inserted before
+       the @enduml line.
     """
     if "@startuml" not in puml:
         return puml
 
+    lines = puml.splitlines()
+
+    # Split off @enduml so we can insert closers just before it
+    enduml_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip() == "@enduml":
+            enduml_idx = i
+            break
+
+    body   = lines[:enduml_idx] if enduml_idx is not None else lines
+    tail   = lines[enduml_idx:] if enduml_idx is not None else []
+
     depth = 0
     out: List[str] = []
-    for ln in puml.splitlines():
+    for ln in body:
         stripped = ln.strip()
         opens  = stripped.count("{")
         closes = stripped.count("}")
         net    = opens - closes
 
         if net < 0 and depth + net < 0:
-            # This line has more closes than the current depth allows — drop orphans
+            # More closes than current depth — drop orphaned `}`
             to_drop = -(depth + net)
             fixed = ln
             for _ in range(to_drop):
-                # Remove the last unmatched `}` from the line
                 idx = fixed.rfind("}")
                 if idx != -1:
                     fixed = fixed[:idx] + fixed[idx+1:]
@@ -1173,7 +1460,12 @@ def repair_unbalanced_class_braces(puml: str) -> str:
             out.append(ln)
             depth = max(0, depth + net)
 
-    return "\n".join(out)
+    # Close any still-open blocks before @enduml
+    if depth > 0:
+        print(f"      [REPAIR] Inserting {depth} missing '}}' before @enduml to close unclosed class body")
+        out.extend(["}"] * depth)
+
+    return "\n".join(out + tail)
 
 
 # Element keywords that are only valid in specific diagram families.
@@ -1403,6 +1695,58 @@ def repair_forward_referenced_objects(puml: str) -> str:
     return rebuilt
 
 
+def repair_quoted_state_targets(puml: str) -> str:
+    """
+    Fix state diagram transitions that use quoted strings as targets instead of
+    plain identifiers or declared aliases.
+
+    PlantUML state diagrams do not allow quoted strings as transition endpoints:
+        WRONG:   [*] --> "Initializing"
+        CORRECT: [*] --> Initializing       (if declared as plain state)
+        CORRECT: [*] --> initializing       (if declared as  state "Initializing" as initializing)
+
+    Strategy:
+    1. Collect all declared alias identifiers (from  state "..." as ALIAS  lines).
+    2. On transition lines (containing --> or <--), strip quotes from targets:
+       - If a quoted name matches a declared alias's display name, replace with alias.
+       - Otherwise, convert the quoted name to a plain snake_case identifier.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    lines = puml.splitlines()
+
+    # Collect declared aliases:  state "Display Name" as alias
+    alias_map: Dict[str, str] = {}  # display_name.lower() -> alias
+    for ln in lines:
+        m = re.match(r'\s*state\s+"([^"]+)"\s+as\s+(\w+)', ln)
+        if m:
+            alias_map[m.group(1).lower()] = m.group(2)
+
+    # Transition line pattern: anything --> "Quoted" or "Quoted" --> anything
+    TRANS_RE = re.compile(r'(-->|<--)')
+    QUOTED_TARGET = re.compile(r'"([^"]+)"')
+
+    out = []
+    for ln in lines:
+        if TRANS_RE.search(ln) and '"' in ln:
+            def replace_quoted(m):
+                name = m.group(1)
+                # Check if it matches a known alias display name
+                if name.lower() in alias_map:
+                    return alias_map[name.lower()]
+                # Otherwise convert to snake_case identifier
+                ident = re.sub(r'[^\w]+', '_', name).strip('_')
+                print(f"      [REPAIR] state transition: quoted \"{name}\" -> {ident}")
+                return ident
+            fixed = QUOTED_TARGET.sub(replace_quoted, ln)
+            out.append(fixed)
+        else:
+            out.append(ln)
+
+    return "\n".join(out)
+
+
 def repair_stray_closing_braces(puml: str, diagram_type: str) -> str:
     """
     Remove `}` lines that have no matching opener in the diagram body.
@@ -1494,6 +1838,220 @@ def repair_orphan_activity_keywords(puml: str) -> str:
     return "\n".join(out)
 
 
+def repair_usecase_rectangle_body(puml: str) -> str:
+    """
+    Fix two common usecase diagram mistakes:
+
+    1. Bare alias references inside rectangle/package blocks.
+       PlantUML does not allow referencing pre-declared aliases inside a { } block.
+       The model often declares usecases at the top level, then tries to "place" them
+       inside a rectangle by listing their aliases:
+
+         WRONG:
+           usecase "Detect Autopilot" as detect_autopilot
+           rectangle "System" as sys {
+             detect_autopilot          ← bare alias reference — syntax error
+           }
+
+       Fix: move the usecase declarations inside the block and remove the top-level
+       declarations, OR if the block only contains bare references with no other
+       content, just remove the bare-reference lines (leaving declarations at top level).
+
+       We take the simpler safe approach: remove bare identifier lines inside blocks
+       (they are redundant since the usecase is already declared).
+
+    2. Actor→usecase arrows using --|> (generalisation) instead of --> (association).
+       --|> between an actor and a usecase is semantically wrong and renders badly.
+
+         WRONG:   user --|> detect_autopilot : <<trigger>>
+         CORRECT: user --> detect_autopilot : <<trigger>>
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    lines = puml.splitlines()
+
+    # Collect declared aliases so we can detect bare references
+    declared_aliases: set = set()
+    DECL_RE = re.compile(r'\bas\s+(\w+)', re.IGNORECASE)
+    for ln in lines:
+        for m in DECL_RE.finditer(ln):
+            declared_aliases.add(m.group(1))
+
+    # Fix bare alias references inside blocks and wrong arrows
+    depth = 0
+    out = []
+    for ln in lines:
+        stripped = ln.strip()
+
+        # Track brace depth
+        depth += stripped.count('{') - stripped.count('}')
+
+        # Fix 1: bare alias reference inside a block
+        if depth > 0 and stripped in declared_aliases:
+            print(f"      [REPAIR] Removed bare alias reference inside block: {stripped!r}")
+            continue
+
+        # Fix 2: actor→usecase --|> should be -->
+        # Match lines like:  alias --|> other_alias : <<something>>
+        # but NOT pure actor generalisation (actor --|> actor)
+        fixed = re.sub(
+            r'(\w+)\s+--\|>\s+(\w+)(\s*:.*)?$',
+            lambda m: (
+                f"{m.group(1)} --> {m.group(2)}{m.group(3) or ''}"
+                if m.group(3) and '<<' in m.group(3)  # has stereotype → association, not generalisation
+                else m.group(0)  # no stereotype → leave as-is (may be genuine generalisation)
+            ),
+            ln
+        )
+        if fixed != ln:
+            print(f"      [REPAIR] usecase: --|> with stereotype changed to -->: {ln.strip()!r}")
+        out.append(fixed)
+
+    return "\n".join(out)
+
+
+def repair_dotted_class_names(puml: str) -> str:
+    """
+    Fix class names that contain dots, which PlantUML either misparses or rejects.
+
+    Two failure modes:
+    1. Bare keyword collision:  class.v1 {
+       The model dropped the prefix, leaving the `class` keyword directly touching
+       a dot -- PlantUML sees keyword + attribute accessor, not a class name.
+       Fix: replace the dot with underscore -> class_v1 {
+
+    2. Dotted module paths used as class names:  class routers.utils {
+       PlantUML treats the dot as a namespace separator which can cause rendering
+       issues and syntax errors inside package blocks.
+       Fix: replace all dots in the name with underscores -> class routers_utils {
+
+    Both fixes also rewrite any subsequent references to the old dotted name.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    lines = puml.splitlines()
+
+    CLASS_DECL = re.compile(
+        r'^(\s*(?:abstract\s+)?class)'
+        r'(\.\w[\w.]*|\s+\w[\w.]*\.\w[\w.]*)'
+        r'(\s*(?:as\s+\w+)?\s*(?:\{.*)?)?$',
+        re.IGNORECASE
+    )
+
+    renames: dict = {}
+    for ln in lines:
+        m = CLASS_DECL.match(ln)
+        if m:
+            raw = m.group(2).strip()
+            if raw.startswith('.'):
+                old_name = raw[1:]
+                new_name = old_name.replace('.', '_')
+            else:
+                old_name = raw
+                new_name = raw.replace('.', '_')
+            if old_name != new_name:
+                renames[old_name] = new_name
+                print(f"      [REPAIR] dotted class name: {old_name!r} -> {new_name!r}")
+
+    if not renames:
+        return puml
+
+    out = []
+    for ln in lines:
+        m = CLASS_DECL.match(ln)
+        if m:
+            raw = m.group(2).strip()
+            if raw.startswith('.'):
+                old_name = raw[1:]
+                new_name = renames.get(old_name, old_name)
+                out.append(m.group(1) + ' ' + new_name + (m.group(3) or ''))
+                continue
+            elif raw in renames:
+                out.append(m.group(1) + ' ' + renames[raw] + (m.group(3) or ''))
+                continue
+        fixed = ln
+        for old, new in renames.items():
+            fixed = re.sub(r'(?<![\w.])' + re.escape(old) + r'(?![\w])', new, fixed)
+        out.append(fixed)
+
+    return "\n".join(out)
+
+
+def repair_interleaved_edges_in_packages(puml: str) -> str:
+    """
+    Fix class diagrams where the model interleaves edge/arrow lines between class
+    declarations inside a package block.
+
+    PlantUML tolerates some interleaving but it causes rendering issues and
+    occasionally syntax errors, especially when edges reference classes declared
+    later in the same block.
+
+    Strategy: for each package block, collect any edge lines (lines containing
+    --> <|-- *-- o-- ..> etc.) and move them to after the last declaration in
+    the block, just before the closing }.
+
+    Also drops clearly garbled edge targets — lines matching:
+        identifier --> Word identifier   (unquoted multi-word rhs starting with capital)
+    where the rhs is not a known declared name.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    EDGE_RE = re.compile(
+        r'^\s*\S+\s*('
+        r'-->|<--|<-->|\.\.|\.\.>|<\.\.|'
+        r'\*--|o--|<\|--|--\|>|\.\.\|>'
+        r')\s*\S+'
+    )
+    # Garbled: "word Word word" style rhs — capitalised word followed by identifier
+    GARBLED_RE = re.compile(r'-->\s+[A-Z][a-z]+\s+\w')
+
+    lines = puml.splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        stripped = ln.strip()
+
+        # Detect package/namespace block opening
+        if re.match(r'\s*(package|namespace)\s+', ln) and '{' in ln:
+            block_decls = [ln]
+            block_edges = []
+            depth = ln.count('{') - ln.count('}')
+            i += 1
+            while i < len(lines) and depth > 0:
+                bl = lines[i]
+                bs = bl.strip()
+                depth += bs.count('{') - bs.count('}')
+                if depth == 0:
+                    # closing brace — flush edges then close
+                    block_edges_filtered = []
+                    for el in block_edges:
+                        if GARBLED_RE.search(el):
+                            print(f"      [REPAIR] Dropped garbled edge inside package: {el.strip()!r}")
+                        else:
+                            block_edges_filtered.append(el)
+                    block_decls.extend(block_edges_filtered)
+                    block_decls.append(bl)
+                elif EDGE_RE.match(bl):
+                    block_edges.append(bl)
+                else:
+                    block_decls.append(bl)
+                i += 1
+            out.extend(block_decls)
+        else:
+            # Outside package blocks, drop garbled edges too
+            if EDGE_RE.match(ln) and GARBLED_RE.search(ln):
+                print(f"      [REPAIR] Dropped garbled edge: {ln.strip()!r}")
+            else:
+                out.append(ln)
+            i += 1
+
+    return "\n".join(out)
+
+
 def repair_undeclared_alias_edges(puml: str, diagram_type: str) -> str:
     """
     Remove edge lines that reference an alias which was never declared.
@@ -1559,11 +2117,52 @@ def repair_undeclared_alias_edges(puml: str, diagram_type: str) -> str:
 
 
 def extract_start_end_block(raw: str) -> str:
-    m = re.search(r"@startuml.*?@enduml", raw, re.DOTALL)
+    """
+    Extract the @startuml...@enduml block from raw model output.
+
+    Handles:
+    - Clean output (happy path)
+    - Markdown fences (```plantuml or ``` wrapping the block)
+    - Truncated output (model hit max_tokens before writing @enduml):
+        * Appends @enduml after stripping any incomplete trailing line
+        * Warns so the operator knows to increase --max-tokens
+    """
+    # Strip markdown code fences regardless of position.
+    # Matches ```plantuml, ```uml, ``` on their own line, plus closing ```.
+    clean = re.sub(r"^\s*```+(?:plantuml|uml)?\s*$", "", raw, flags=re.MULTILINE)
+    clean = re.sub(r"^\s*```+\s*$", "", clean, flags=re.MULTILINE)
+
+    # Happy path: complete block present
+    m = re.search(r"@startuml.*?@enduml", clean, re.DOTALL)
     if m:
         return m.group(0).strip()
-    if raw.strip():
-        return f"@startuml\n{raw.strip()}\n@enduml"
+
+    # Truncated: @startuml present but @enduml missing
+    start = re.search(r"@startuml", clean)
+    if start:
+        fragment = clean[start.start():].rstrip()
+        lines = fragment.splitlines()
+        # Drop any trailing incomplete line (e.g. 'object "Foo" as' with no alias,
+        # or 'class Bar {' that was never closed at the token boundary).
+        # A line is "incomplete" if it ends with common truncation patterns.
+        _INCOMPLETE = re.compile(
+            r"(?:"
+            r"object\s+\"[^\"]*\"\s+as\s*$"      # object "X:Y" as   ← no alias
+            r"|class\s+\w[\w.]*\s*\{?\s*$"        # class Foo {       ← open brace, no body
+            r"|\bas\s*$"                           # dangling 'as'
+            r")"
+        )
+        while lines and _INCOMPLETE.search(lines[-1].strip()):
+            lines.pop()
+        # Also strip a trailing open brace with no matching content
+        fragment = "\n".join(lines)
+        print("      [WARN] Output truncated (no @enduml found). "
+              "Diagram may be incomplete — consider raising --max-tokens.")
+        return fragment + "\n@enduml"
+
+    # No @startuml at all — wrap entire cleaned content as a best-effort
+    if clean.strip():
+        return f"@startuml\n{clean.strip()}\n@enduml"
     return ""
 
 def normalize_startuml_name(puml: str, uml_name: str) -> str:
@@ -1922,8 +2521,14 @@ def pass3_generate_all(
             puml = repair_orphan_activity_keywords(puml)
             puml = repair_truncated_activity(puml)
         if dtype == "class":
+            puml = repair_dotted_class_names(puml)
+            puml = repair_interleaved_edges_in_packages(puml)
             puml = repair_class_diagram_lines(puml)
             puml = repair_unbalanced_class_braces(puml)
+        if dtype == "state":
+            puml = repair_quoted_state_targets(puml)
+        if dtype in ("usecase", "component", "deployment"):
+            puml = repair_usecase_rectangle_body(puml)
         if dtype == "object":
             puml = repair_forward_referenced_objects(puml)
         results[dtype] = puml
@@ -1962,8 +2567,14 @@ def pass3_generate_all(
                 repaired = repair_orphan_activity_keywords(repaired)
                 repaired = repair_truncated_activity(repaired)
             if dtype == "class":
+                repaired = repair_dotted_class_names(repaired)
+                repaired = repair_interleaved_edges_in_packages(repaired)
                 repaired = repair_class_diagram_lines(repaired)
                 repaired = repair_unbalanced_class_braces(repaired)
+            if dtype == "state":
+                repaired = repair_quoted_state_targets(repaired)
+            if dtype in ("usecase", "component", "deployment"):
+                repaired = repair_usecase_rectangle_body(repaired)
             if dtype == "object":
                 repaired = repair_forward_referenced_objects(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
@@ -1998,7 +2609,7 @@ def main() -> None:
                         default=int(_env_len) if _env_len else None,
                         help="Override context length. Auto-detected from model name if omitted.")
     parser.add_argument("--max-tokens",    type=int,
-                        default=int(os.environ.get("VLLM_MAX_TOKENS",  "2048")))
+                        default=int(os.environ.get("VLLM_MAX_TOKENS",  "8192")))
     parser.add_argument("--extract-tokens", type=int,
                         default=int(os.environ.get("VLLM_EXTRACT_TOKENS", "1024")),
                         help="Max tokens for Pass 1 extraction (smaller = faster, default 1024).")
@@ -2071,6 +2682,7 @@ def main() -> None:
     # [4] Load vLLM model ONCE  ← the whole point
     # ------------------------------------------------------------------
     print(f"\n[4] Loading vLLM model (once — used for all passes)...")
+    preflight_vram_check(args.model, args.tp, args.gpu_memory_utilization)
     print(f"    {args.model}  |  tp={args.tp}  |  max_len={args.max_model_len}")
     if args.tokenizer_mode != "auto" or args.load_format != "auto":
         print(f"    tokenizer_mode={args.tokenizer_mode}  config_format={args.config_format}  load_format={args.load_format}")
