@@ -1497,6 +1497,58 @@ def repair_forward_referenced_objects(puml: str) -> str:
     return rebuilt
 
 
+def repair_quoted_state_targets(puml: str) -> str:
+    """
+    Fix state diagram transitions that use quoted strings as targets instead of
+    plain identifiers or declared aliases.
+
+    PlantUML state diagrams do not allow quoted strings as transition endpoints:
+        WRONG:   [*] --> "Initializing"
+        CORRECT: [*] --> Initializing       (if declared as plain state)
+        CORRECT: [*] --> initializing       (if declared as  state "Initializing" as initializing)
+
+    Strategy:
+    1. Collect all declared alias identifiers (from  state "..." as ALIAS  lines).
+    2. On transition lines (containing --> or <--), strip quotes from targets:
+       - If a quoted name matches a declared alias's display name, replace with alias.
+       - Otherwise, convert the quoted name to a plain snake_case identifier.
+    """
+    if "@startuml" not in puml:
+        return puml
+
+    lines = puml.splitlines()
+
+    # Collect declared aliases:  state "Display Name" as alias
+    alias_map: Dict[str, str] = {}  # display_name.lower() -> alias
+    for ln in lines:
+        m = re.match(r'\s*state\s+"([^"]+)"\s+as\s+(\w+)', ln)
+        if m:
+            alias_map[m.group(1).lower()] = m.group(2)
+
+    # Transition line pattern: anything --> "Quoted" or "Quoted" --> anything
+    TRANS_RE = re.compile(r'(-->|<--)')
+    QUOTED_TARGET = re.compile(r'"([^"]+)"')
+
+    out = []
+    for ln in lines:
+        if TRANS_RE.search(ln) and '"' in ln:
+            def replace_quoted(m):
+                name = m.group(1)
+                # Check if it matches a known alias display name
+                if name.lower() in alias_map:
+                    return alias_map[name.lower()]
+                # Otherwise convert to snake_case identifier
+                ident = re.sub(r'[^\w]+', '_', name).strip('_')
+                print(f"      [REPAIR] state transition: quoted \"{name}\" -> {ident}")
+                return ident
+            fixed = QUOTED_TARGET.sub(replace_quoted, ln)
+            out.append(fixed)
+        else:
+            out.append(ln)
+
+    return "\n".join(out)
+
+
 def repair_stray_closing_braces(puml: str, diagram_type: str) -> str:
     """
     Remove `}` lines that have no matching opener in the diagram body.
@@ -2059,6 +2111,8 @@ def pass3_generate_all(
         if dtype == "class":
             puml = repair_class_diagram_lines(puml)
             puml = repair_unbalanced_class_braces(puml)
+        if dtype == "state":
+            puml = repair_quoted_state_targets(puml)
         if dtype == "object":
             puml = repair_forward_referenced_objects(puml)
         results[dtype] = puml
@@ -2099,6 +2153,8 @@ def pass3_generate_all(
             if dtype == "class":
                 repaired = repair_class_diagram_lines(repaired)
                 repaired = repair_unbalanced_class_braces(repaired)
+            if dtype == "state":
+                repaired = repair_quoted_state_targets(repaired)
             if dtype == "object":
                 repaired = repair_forward_referenced_objects(repaired)
             # If repair still fails, keep repaired anyway (often closer), but warn.
