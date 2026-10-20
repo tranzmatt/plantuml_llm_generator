@@ -14,6 +14,12 @@
 > Tables in this document are generated from the source code and are
 > authoritative for the version analysed. Items marked **TBD** cannot be
 > determined from code and are listed in [Appendix A](#appendix-a-open-items).
+{% if coverage and coverage.known_unknowns %}
+>
+> **Incomplete:** {{ coverage.known_unknowns | length }} use(s) of interface
+> technologies were found where no interface was extracted. Those interfaces are
+> **not documented here**; see [Appendix A.2](#appendix-a2).
+{% endif %}
 {% if generated_items %}
 > {{ generated_items }} descriptions marked *(generated)* were drafted by a
 > language model from interface signatures only{% if narrative_aliased %}, with all
@@ -138,6 +144,34 @@ Values: {% for f in d.fields %}{{ f.name | code }}{% if not loop.last %}, {% end
 {% endfor %}
 {% else %}
 None.
+{% endif %}
+{% if coverage and coverage.known_unknowns %}
+
+<a id="appendix-a2"></a>
+### A.2 Interfaces not extracted
+
+These modules use a library that implies an interface, but archdoc extracted no
+interface of that kind from them. The interfaces exist in the code and are
+missing from this document.
+
+| Module | Technology | Kind | Direction |
+|--------|------------|------|-----------|
+{% for u in coverage.known_unknowns -%}
+| {{ u.module | code }} | {{ u.description }} (`{{ u.library }}`) | {{ u.kind }} | {{ u.direction }} |
+{% endfor %}
+{% endif %}
+{% if coverage %}
+
+## Appendix C. Coverage
+
+| Item | Total | From code | Generated | TBD |
+|------|------:|----------:|----------:|----:|
+| Interface purposes | {{ coverage.interfaces.total }} | {{ coverage.interfaces.from_code }} | {{ coverage.interfaces.generated }} | {{ coverage.interfaces.tbd }} |
+| Operation descriptions | {{ coverage.operations.total }} | {{ coverage.operations.from_code }} | {{ coverage.operations.generated }} | {{ coverage.operations.tbd }} |
+| Parameter descriptions | {{ coverage.parameters.total }} | {{ coverage.parameters.from_code }} | {{ coverage.parameters.generated }} | {{ coverage.parameters.tbd }} |
+| Data field descriptions | {{ coverage.data_fields.total }} | {{ coverage.data_fields.from_code }} | {{ coverage.data_fields.generated }} | {{ coverage.data_fields.tbd }} |
+
+Interface technologies used but not extracted: **{{ coverage.known_unknowns | length }}**.
 {% endif %}
 {% if diagrams %}
 

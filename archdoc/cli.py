@@ -12,6 +12,7 @@ import re
 import time
 
 from .backends import make_backend, ollama_remote_host
+from .coverage import coverage_lines, icd_coverage
 from .egress import EgressAborted, EgressLog, build_payload, estimate_tokens
 from .extract import extract_python
 from .extract.python_ast import collect_python_files
@@ -279,9 +280,13 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
         if narrate:
             ctx["narrative_aliased"] = llm.config.policy_for(llm.tier).pseudonymize != "off"
             _narrate(llm, ctx, ir.interfaces)
+        ctx["coverage"] = icd_coverage(ctx, ir)
+        _write(os.path.join(args.output, "coverage.json"), json.dumps(ctx["coverage"], indent=1))
         path = _write(os.path.join(icd_dir, f"{ir.repo}_icd.md"), render_icd(ctx, args.template))
         print(f"  wrote {path}  ({ctx['summary']['interfaces']} interfaces, "
               f"{ctx['summary']['operations']} operations, {len(ctx['gaps'])} open items)")
+        for line in coverage_lines(ctx["coverage"]):
+            print(f"  {line}")
     else:
         for iface in ir.interfaces:
             ctx = build_icd_context(ir, [iface], title=f"{iface.name} Interface Control Document",
@@ -289,6 +294,7 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
             if narrate:
                 ctx["narrative_aliased"] = llm.config.policy_for(llm.tier).pseudonymize != "off"
                 _narrate(llm, ctx, [iface])
+            ctx["coverage"] = icd_coverage(ctx, ir)
             path = _write(os.path.join(icd_dir, f"{anchor(iface.id)}.md"), render_icd(ctx, args.template))
             print(f"  wrote {path}")
     snap = os.path.join(_state_dir(args.output), "icd_snapshot.json")

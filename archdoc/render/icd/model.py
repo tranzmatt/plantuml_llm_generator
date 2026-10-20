@@ -198,6 +198,7 @@ def build_icd_context(
         "gaps": b.gaps,
         "generated_items": 0,
         "narrative_aliased": False,
+        "coverage": None,                  # set by archdoc.coverage.icd_coverage after narrative
         "diagrams": diagrams or [],
     }
 
