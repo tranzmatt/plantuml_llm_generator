@@ -372,7 +372,7 @@ def main():
     )
 
     # Parse the combined output into separate diagrams
-    print("\n[print("[repo_to_diagrams] Calling Ollama once to generate ALL diagrams...")] Parsing output and writing diagram files...")
+    print("\n[repo_to_diagrams] Parsing output and writing diagram files...")
     diagram_types = [dt for dt, _ in DIAGRAM_TYPES]
     parsed = parse_multi_diagram_output(raw_output, diagram_types)
 
