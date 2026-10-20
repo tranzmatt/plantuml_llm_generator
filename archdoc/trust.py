@@ -44,6 +44,7 @@ class Backend:
     kind: str = "openai"               # openai (OpenAI-compatible) | ollama (native API)
     num_ctx: Optional[int] = None      # ollama: context window per request
     timeout: int = 600                 # seconds; first calls may include a cold model load
+    keep_alive: str = "30m"            # ollama: keep the model loaded between requests of a run
 
 
 @dataclass

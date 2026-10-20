@@ -190,7 +190,7 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
     cfg.cloud_model_patterns = list(trust.get("cloud_model_patterns", DEFAULT_CLOUD_MODEL_PATTERNS))
 
     for name, b in data.get("backends", {}).items():
-        unknown = set(b) - {"url", "model", "trust", "api_key_env", "kind", "num_ctx", "timeout"}
+        unknown = set(b) - {"url", "model", "trust", "api_key_env", "kind", "num_ctx", "timeout", "keep_alive"}
         if unknown:
             raise PolicyError(f"{src}: [backends.{name}] unknown key(s) {', '.join(sorted(unknown))}")
         if "api_key" in b:

@@ -438,3 +438,64 @@ def test_ollama_remote_host_detection(http_server, monkeypatch):
         assert ollama_remote_host("http://127.0.0.1:1", "x") is None             # unreachable: no opinion
     finally:
         server.shutdown()
+
+
+# -- unreachable or overloaded backends ------------------------------------------------
+
+def test_circuit_breaker_skips_after_unavailable(ir):
+    calls = []
+
+    def down(system, user, schema):
+        calls.append(1)
+        raise BackendError("timed out", unavailable=True)
+
+    ctx = _ctx(ir, "local", down)
+    first = plan_sequence(ctx, _entry(ir, READ_ITEM))
+    second = plan_narrative(ctx, ir.interfaces[0])
+    assert not first.ok and not second.ok and len(calls) == 1          # second request never sent
+    assert second.errors[0].startswith("skipped: backend unavailable earlier in this run")
+
+
+def test_rejected_request_does_not_trip_breaker(ir):
+    def reject(system, user, schema):
+        raise BackendError("HTTP 400: bad request")                  # this prompt, not the server
+
+    ctx = _ctx(ir, "local", reject)
+    plan_sequence(ctx, _entry(ir, READ_ITEM))
+    assert ctx.backend.unavailable is None
+    assert len(ctx.backend.calls) == 1
+    plan_sequence(ctx, _entry(ir, READ_ITEM))
+    assert len(ctx.backend.calls) == 2                                # still tried
+
+
+def test_cli_skips_llm_when_backend_does_not_answer(tmp_path, monkeypatch, capsys):
+    class Dead(ScriptedBackend):
+        def health(self, timeout=10):
+            raise BackendError("http://spark:11434/api/version: timed out", unavailable=True)
+
+    monkeypatch.setattr(cli, "make_backend", lambda cfg: Dead(sequence_responder))
+    out = tmp_path / "out"
+    rc = cli.main(["all", FIXTURE, "-o", str(out), "--types", "class,sequence", "--narrative", "--model", "m",
+                   "--trust", "local", "--no-validate", "--no-date"])
+    assert rc == 0
+    printed = capsys.readouterr().out
+    assert "[SKIP] LLM outputs: backend not answering" in printed
+    assert os.listdir(out / "diagrams") == ["sample_app_class.puml"]   # deterministic output still written
+    assert (out / "icd" / "sample_app_icd.md").exists()
+
+
+def test_ollama_warm_up_and_keep_alive(http_server):
+    _Recorder.reply = {"message": {"content": "{}"}, "load_duration": 3_000_000_000}
+    b = OllamaBackend(Backend("o", http_server, "m", "local", kind="ollama", num_ctx=4096, keep_alive="1h"))
+    assert b.warm_up() == 3.0
+    b.complete_json("s", "u", {})
+    (warm_path, _, warm), (chat_path, _, chat) = _Recorder.seen
+    assert warm_path == "/api/generate" and warm["prompt"] == "" and warm["options"]["num_ctx"] == 4096
+    assert warm["keep_alive"] == "1h" and chat["keep_alive"] == "1h"   # same settings: no reload between
+
+
+def test_unreachable_server_is_unavailable():
+    b = OllamaBackend(Backend("o", "http://127.0.0.1:1", "m", "local", kind="ollama", timeout=2))
+    with pytest.raises(BackendError) as exc:
+        b.health(timeout=2)
+    assert exc.value.unavailable

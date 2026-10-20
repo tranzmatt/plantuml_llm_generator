@@ -11,7 +11,7 @@ from collections import Counter
 import re
 import time
 
-from .backends import make_backend, ollama_remote_host
+from .backends import BackendError, make_backend, ollama_remote_host
 from .coverage import coverage_lines, icd_coverage
 from .egress import EgressAborted, EgressLog, build_payload, estimate_tokens
 from .extract import extract_python
@@ -146,16 +146,30 @@ def _llm_context(args, cfg, ir):
         tier, decision.reasons = CLOUD, decision.reasons + ["forced with --trust cloud"]
     elif args.backend and args.trust and args.trust != tier:
         raise TrustError(f"backend {backend.name!r} classifies as {tier}; --trust can only make it stricter")
+    llm_backend = make_backend(backend)
+    print(f"  LLM: {backend.model} via {backend.kind} @ {backend.url or 'in-process'} "
+          f"(tier {tier}: {'; '.join(decision.reasons)})")
+    try:
+        llm_backend.health()
+    except BackendError as exc:
+        print(f"  [SKIP] LLM outputs: backend not answering ({exc}); writing the rest without it")
+        return None
+    t0 = time.monotonic()
+    try:
+        loaded = llm_backend.warm_up()
+    except BackendError as exc:
+        print(f"  [SKIP] LLM outputs: model failed to load within {backend.timeout}s ({exc})")
+        return None
+    if loaded is not None:
+        print(f"  model ready ({time.monotonic() - t0:.0f}s incl. load)")
     state = _state_dir(args.output)
     alias_path = os.path.join(state, "alias_map.json")
     ctx = PlanContext(
         ir=ir, config=cfg, tier=tier, aliases=AliasMap.load(alias_path),
-        backend=make_backend(backend),
+        backend=llm_backend,
         log=EgressLog(os.path.join(state, "egress.jsonl")),
         depth=args.depth, max_nodes=args.max_nodes, alias_path=alias_path,
     )
-    print(f"  LLM: {backend.model} via {backend.kind} @ {backend.url or 'in-process'} "
-          f"(tier {tier}: {'; '.join(decision.reasons)})")
     return ctx
 
 

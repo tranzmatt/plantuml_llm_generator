@@ -19,7 +19,12 @@ from ..trust import Backend
 
 
 class BackendError(Exception):
-    pass
+    """`unavailable`: the server could not be reached or did not answer in time
+    (as opposed to rejecting this particular request). Trips the circuit breaker."""
+
+    def __init__(self, message: str, unavailable: bool = False):
+        super().__init__(message)
+        self.unavailable = unavailable
 
 
 @dataclass
@@ -36,10 +41,20 @@ class LLMBackend:
     name: str = "?"
     url: Optional[str] = None
     model: Optional[str] = None
+    # set when the backend became unreachable during a run: later requests are
+    # skipped instead of each waiting out its own timeout (circuit breaker)
+    unavailable: Optional[str] = None
 
     def complete_json(self, system: str, user: str, schema: Dict[str, Any],
                       max_tokens: int = 2048) -> Completion:
         raise NotImplementedError
+
+    def health(self, timeout: int = 10) -> None:
+        """Raise BackendError if the server does not answer a cheap request quickly."""
+
+    def warm_up(self) -> Optional[float]:
+        """Load the model before real requests; returns seconds taken, or None if not applicable."""
+        return None
 
 
 def _post(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout: int) -> Dict[str, Any]:
@@ -52,9 +67,20 @@ def _post(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout: int)
             return json.loads(resp.read())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:500]
-        raise BackendError(f"{url}: HTTP {exc.code}: {detail}") from None
+        raise BackendError(f"{url}: HTTP {exc.code}: {detail}", unavailable=exc.code in (502, 503, 504)) from None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise BackendError(f"{url}: {exc}") from None
+        raise BackendError(f"{url}: {exc}", unavailable=True) from None
+
+
+def _get(url: str, headers: Dict[str, str], timeout: int) -> Dict[str, Any]:
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        raise BackendError(f"{url}: HTTP {exc.code}", unavailable=exc.code in (502, 503, 504)) from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise BackendError(f"{url}: {exc}", unavailable=True) from None
 
 
 class OllamaBackend(LLMBackend):
@@ -65,11 +91,25 @@ class OllamaBackend(LLMBackend):
         self.num_ctx = cfg.num_ctx or 8192
         self.timeout = cfg.timeout
         self.temperature = temperature
+        self.keep_alive = cfg.keep_alive
+
+    def health(self, timeout: int = 10) -> None:
+        _get(f"{self.url}/api/version", {}, timeout)
+
+    def warm_up(self) -> Optional[float]:
+        """An empty generate loads the model (and pays first-use GPU setup) once,
+        with the same num_ctx as the real requests so it is not reloaded."""
+        body = {"model": self.model, "prompt": "", "stream": False, "keep_alive": self.keep_alive,
+                "options": {"num_ctx": self.num_ctx}}
+        d = _post(f"{self.url}/api/generate", body, {}, self.timeout)
+        dur = d.get("load_duration") or d.get("total_duration")
+        return dur / 1e9 if dur else None
 
     def complete_json(self, system, user, schema, max_tokens=2048) -> Completion:
         body = {
             "model": self.model,
             "stream": False,
+            "keep_alive": self.keep_alive,
             "format": schema,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "options": {"temperature": self.temperature, "num_ctx": self.num_ctx, "num_predict": max_tokens},
@@ -98,6 +138,9 @@ class OpenAICompatBackend(LLMBackend):
             if not key:
                 raise BackendError(f"backend {cfg.name!r}: environment variable {cfg.api_key_env} is not set")
             self.headers["Authorization"] = f"Bearer {key}"
+
+    def health(self, timeout: int = 10) -> None:
+        _get(f"{self.url}/models", self.headers, timeout)
 
     def complete_json(self, system, user, schema, max_tokens=2048) -> Completion:
         body = {

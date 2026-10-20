@@ -105,10 +105,15 @@ def run_plan(
         result.attempts = attempt
         errors: List[str] = []
         raw = ""
+        if backend.unavailable:
+            result.errors = [f"skipped: backend unavailable earlier in this run ({backend.unavailable})"]
+            return result
         try:
             completion = backend.complete_json(system, user, schema, max_tokens=max_tokens)
             raw = completion.text
         except BackendError as exc:
+            if exc.unavailable:
+                backend.unavailable = str(exc)
             result.errors = [f"backend: {exc}"]
             if log:
                 log.record(payload, backend.name, backend.url, model=backend.model, attempt=attempt,
