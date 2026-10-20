@@ -14,6 +14,12 @@
 > Tables in this document are generated from the source code and are
 > authoritative for the version analysed. Items marked **TBD** cannot be
 > determined from code and are listed in [Appendix A](#appendix-a-open-items).
+{% if generated_items %}
+> {{ generated_items }} descriptions marked *(generated)* were drafted by a
+> language model from interface signatures only{% if narrative_aliased %}, with all
+> identifiers pseudonymized (the model never saw real names, so its wording
+> is especially speculative){% endif %}, and should be reviewed.
+{% endif %}
 
 ## 1. Scope
 
@@ -39,13 +45,13 @@
 | Owner | {{ i.owner | code }} |
 | Protocol | {{ i.protocol | cell }} |
 {% if i.address %}| Address | {{ i.address | code }} |
-{% endif %}| Purpose | {{ i.purpose | tbd }} |
+{% endif %}| Purpose | {{ i.purpose | tbd }}{% if i.purpose_generated %} *(generated)*{% endif %} |
 {% if i.kind == "env" %}
 
 | Variable | Default | Used in | Description |
 |----------|---------|---------|-------------|
 {% for op in i.operations -%}
-| <a id="{{ op.anchor }}"></a>{{ op.name | code }} | {{ op.meta.get("default") | code }} | {{ op.meta.get("used_in") | cell }} | {{ op.summary | tbd }} |
+| <a id="{{ op.anchor }}"></a>{{ op.name | code }} | {{ op.meta.get("default") | code }} | {{ op.meta.get("used_in") | cell }} | {{ op.summary | tbd }}{% if op.summary_generated %} *(generated)*{% endif %} |
 {% endfor %}
 {% else %}
 {% set outer = loop %}
@@ -54,7 +60,8 @@
 <a id="{{ op.anchor }}"></a>
 #### 3.{{ outer.index }}.{{ loop.index }} {{ op.name | code }}
 
-{{ op.summary | tbd }}
+{{ op.summary | tbd }}{% if op.summary_generated %} *(generated)*{% endif %}
+
 
 {% if op.handler %}
 - **Handler:** {{ op.handler | code }}
@@ -80,13 +87,13 @@
 | Argument | Type | Required | Default | Constraints | Description |
 |----------|------|----------|---------|-------------|-------------|
 {% for p in op.params -%}
-| {{ (p.flags or p.name) | code }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }} |
+| {{ (p.flags or p.name) | code }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }}{% if p.description_generated %} *(generated)*{% endif %} |
 {% endfor %}
 {% else %}
 | Parameter | In | Type | Required | Default | Constraints | Description |
 |-----------|----|------|----------|---------|-------------|-------------|
 {% for p in op.params -%}
-| {{ p.name | code }} | {{ p.location | cell }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }} |
+| {{ p.name | code }} | {{ p.location | cell }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }}{% if p.description_generated %} *(generated)*{% endif %} |
 {% endfor %}
 {% endif %}
 {% else %}

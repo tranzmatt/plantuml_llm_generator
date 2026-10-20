@@ -759,8 +759,9 @@ def _resolve_bodies(res: Resolver) -> None:
     for pm in res.modules.values():
         for fnode in pm.funcs:
             env = _function_env(res, pm, fnode)
-            calls: Set[str] = set()
-            creates: Set[str] = set()
+            # calls/creates keep first-occurrence source order (sequence diagrams
+            # need it); raises are a set
+            ordered: List[Tuple[int, int, str, str]] = []
             raises: Set[str] = set()
             for n in _walk_no_nested_scopes(fnode.node.body):
                 if isinstance(n, ast.Call):
@@ -768,9 +769,9 @@ def _resolve_bodies(res: Resolver) -> None:
                     if target is None:
                         continue
                     if target in res.classes:
-                        creates.add(target)
+                        ordered.append((n.lineno, n.col_offset, "create", target))
                     elif target != fnode.fn.id:
-                        calls.add(target)
+                        ordered.append((n.lineno, n.col_offset, "call", target))
                 elif isinstance(n, ast.Raise) and n.exc is not None:
                     exc = n.exc.func if isinstance(n.exc, ast.Call) else n.exc
                     dn = dotted_name(exc)
@@ -781,8 +782,9 @@ def _resolve_bodies(res: Resolver) -> None:
                         raises.add(rid)
                     elif dn in _BUILTIN_EXCEPTIONS:
                         raises.add(dn)
-            fnode.fn.calls = sorted(calls)
-            fnode.fn.creates = sorted(creates)
+            ordered.sort()
+            fnode.fn.calls = list(dict.fromkeys(t for _, _, k, t in ordered if k == "call"))
+            fnode.fn.creates = list(dict.fromkeys(t for _, _, k, t in ordered if k == "create"))
             fnode.fn.raises = sorted(raises)
 
 

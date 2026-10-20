@@ -141,8 +141,9 @@ def test_super_call(ir):
 
 
 def test_module_level_instances_and_externals(ir):
+    # source order: default_db.query(), session.post(), requests.get()
     assert ir.find_function("shop.repo:ping").calls == [
-        "ext:requests.Session.post", "ext:requests.get", "shop.repo:Database.query",
+        "shop.repo:Database.query", "ext:requests.Session.post", "ext:requests.get",
     ]
 
 

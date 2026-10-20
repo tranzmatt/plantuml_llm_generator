@@ -61,8 +61,8 @@ class Function:
     decorators: List[Decorator] = field(default_factory=list)
     visibility: str = "public"         # public | protected | private
     docstring: Optional[str] = None
-    calls: List[str] = field(default_factory=list)     # resolved function ids or ext:...
-    creates: List[str] = field(default_factory=list)   # class ids instantiated
+    calls: List[str] = field(default_factory=list)     # resolved function ids or ext:..., source order
+    creates: List[str] = field(default_factory=list)   # class ids instantiated, source order
     raises: List[str] = field(default_factory=list)    # class ids, ext:..., or builtin names
 
 

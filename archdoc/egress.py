@@ -79,6 +79,8 @@ class Payload:
     data: Dict[str, Any]
     text: str
     redactions: List[Tuple[str, str]] = field(default_factory=list)   # (location, kind)
+    # refs exposed in this payload, by role; planners turn these into schema enums
+    allowed: Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def token_estimate(self) -> int:
@@ -490,6 +492,113 @@ class _ViewBuilder:
         return view
 
 
+def _finish(builder: _ViewBuilder, data: Dict[str, Any], tier: str, artifact: str,
+            allowed: Optional[Dict[str, List[str]]] = None) -> Payload:
+    if builder.abort_findings:
+        raise EgressAborted(builder.abort_findings)
+    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    return Payload(tier=tier, artifact=artifact, data=data, text=text,
+                   redactions=builder.redactions, allowed=allowed or {})
+
+
+def participant_of(function_id: str) -> str:
+    """Sequence participant for a function: its class for methods, else its module."""
+    mid, _, qual = function_id.partition(":")
+    return f"{mid}:{qual.rsplit('.', 1)[0]}" if "." in qual else mid
+
+
+def build_sequence_payload(
+    ir: RepoIR, config: Config, tier: str, aliases: AliasMap,
+    entry_handler: str, function_ids: List[str], via: Optional[Tuple[Interface, Operation]] = None,
+) -> Payload:
+    """Call-graph slice for one entry point. `function_ids` must start with the handler."""
+    b = _ViewBuilder(ir, config, tier, aliases)
+    if not b.base.level_at_least("callgraph"):
+        raise EgressAborted([("policy", f"level={b.base.level} does not allow call graphs")])
+    in_slice = set(function_ids)
+    participants: List[str] = []
+    functions = []
+    for fid in function_ids:
+        fn = ir.find_function(fid)
+        if fn is None:
+            continue
+        owner = participant_of(fid)
+        if owner not in participants:
+            participants.append(owner)
+        mid = b.owner_module(fid)
+        view = b.function_view(fn, mid, is_method=owner != mid)
+        view.pop("decorators", None)
+        view["owner"] = b.symbol_ref(owner, mid)
+        view["calls"] = [b.symbol_ref(c, mid) for c in fn.calls
+                         if c in in_slice or c.startswith(EXTERNAL_PREFIX)]
+        if not view["calls"]:
+            view.pop("calls")
+        functions.append(view)
+    part_views = []
+    for pid in participants:
+        mid = b.owner_module(pid)
+        pv: Dict[str, Any] = {"ref": b.symbol_ref(pid, mid), "type": "class" if pid in b.class_ids else "module"}
+        cls = ir.find_class(pid)
+        if cls is not None and cls.kind != "class":
+            pv["kind"] = cls.kind
+        doc = b.prose(cls.docstring if cls else (ir.module(pid).docstring if ir.module(pid) else None), mid, pid)
+        if doc:
+            pv["doc"] = doc
+        part_views.append(pv)
+    entry: Dict[str, Any] = {"handler": b.symbol_ref(entry_handler, b.owner_module(entry_handler))}
+    if via is not None:
+        iface, op = via
+        mid = iface.owner if iface.owner in b.module_ids else None
+        entry["interface"] = iface.kind
+        opv = b.op_view(iface, op, mid)
+        if "name" in opv:
+            entry["operation"] = opv["name"]
+    data = {"entry": entry, "participants": part_views, "functions": functions}
+    return _finish(b, data, tier, f"sequence:{entry_handler}", {
+        "participants": [pv["ref"] for pv in part_views],
+        "functions": [f["ref"] for f in functions],
+    })
+
+
+def build_interface_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap,
+                            iface: Interface) -> Payload:
+    """One interface, its handlers' signatures and the data types it exchanges."""
+    b = _ViewBuilder(ir, config, tier, aliases)
+    iv = b.interface_view(iface)
+    handlers, seen = [], set()
+    for op in iface.operations:
+        fn = ir.find_function(op.handler) if op.handler else None
+        if fn is not None and fn.id not in seen:
+            seen.add(fn.id)
+            mid = b.owner_module(fn.id)
+            hv = b.function_view(fn, mid, is_method=participant_of(fn.id) != mid)
+            for k in ("decorators", "calls", "creates"):
+                hv.pop(k, None)
+            handlers.append(hv)
+    type_ids = []
+    for op in iface.operations:
+        for t in (op.request, op.response):
+            if t and t.type_id and t.type_id not in type_ids:
+                type_ids.append(t.type_id)
+    types = []
+    for tid in type_ids:
+        cls = ir.find_class(tid)
+        if cls is not None:
+            cv = b.class_view(cls, b.owner_module(tid))
+            cv.pop("methods", None)
+            types.append(cv)
+    data: Dict[str, Any] = {"interface": iv}
+    if handlers:
+        data["handlers"] = handlers
+    if types:
+        data["types"] = types
+    params = sorted({p["name"] for o in iv["ops"] for p in o.get("params", [])})
+    return _finish(b, data, tier, f"icd:{iface.id}", {
+        "operations": [o["ref"] for o in iv["ops"]],
+        "params": params,
+    })
+
+
 def build_payload(
     ir: RepoIR,
     config: Config,
@@ -503,11 +612,7 @@ def build_payload(
     Raises EgressAborted if a secret is found where policy says abort.
     """
     builder = _ViewBuilder(ir, config, tier, aliases)
-    data = builder.build(modules)
-    if builder.abort_findings:
-        raise EgressAborted(builder.abort_findings)
-    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-    return Payload(tier=tier, artifact=artifact, data=data, text=text, redactions=builder.redactions)
+    return _finish(builder, builder.build(modules), tier, artifact)
 
 
 # ===========================================================================

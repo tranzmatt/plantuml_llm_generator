@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 
 import jinja2
 
-from .model import anchor, build_icd_context, inventory_snapshot
+from .model import anchor, apply_narrative, build_icd_context, inventory_snapshot
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 DASH = "—"
@@ -81,4 +81,4 @@ def render_icd(context: Dict[str, Any], template: str = "lightweight") -> str:
     return "\n".join(lines).strip() + "\n"
 
 
-__all__ = ["anchor", "build_icd_context", "inventory_snapshot", "render_icd"]
+__all__ = ["anchor", "apply_narrative", "build_icd_context", "inventory_snapshot", "render_icd"]

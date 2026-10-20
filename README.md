@@ -21,10 +21,28 @@ archdoc all ~/Code/YourProject -o archdoc_out      # class + component diagrams 
 archdoc egress ~/Code/YourProject --trust cloud    # show exactly what a cloud model would receive
 ```
 
+Add an LLM for sequence diagrams and ICD narrative (a 12B local model works):
+
+```bash
+archdoc all ~/Code/YourProject --types class,component,sequence --narrative \
+  --model mistral-nemo:12b --trust local          # ad-hoc Ollama on localhost
+```
+
+Without `--trust local` an ad-hoc backend is treated as **cloud**: identifiers
+are pseudonymized before sending and restored afterwards. For repeat use, declare
+backends in `~/.config/archdoc/config.toml` and pass `--backend NAME`:
+
+```toml
+[backends.laptop]
+url = "http://localhost:11434"
+model = "mistral-nemo:12b"
+kind = "ollama"
+trust = "local"
+```
+
 Set `PLANTUML_JAR=/path/to/plantuml.jar` (or put `plantuml` on PATH) to
-syntax-check every generated diagram. Diagrams that need an LLM (sequence,
-activity, state, use-case, deployment, object) and ICD narrative are not yet
-implemented on this path; use the scripts below for those.
+syntax-check every generated diagram. Activity, state, use-case, deployment and
+object diagrams are not yet on this path; use the scripts below for those.
 
 ---
 

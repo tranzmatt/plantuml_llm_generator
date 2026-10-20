@@ -172,7 +172,7 @@ def test_icd_context_facts(ir):
     router = next(i for i in ctx["interfaces"] if i["id"] == "if:http:shop.api:router")
     get = router["operations"][0]
     assert get["response"]["anchor"] == "dt-shop-models-item"
-    assert router["purpose"] is None and get["semantics"] is None       # narrative comes later
+    assert router["purpose"] is None and not get["summary_generated"]     # narrative comes later
 
 
 def test_icd_gaps_cover_every_tbd(ir):
@@ -215,7 +215,7 @@ def test_cli_all(tmp_path, capsys):
     icd = (out / "icd" / "sample_app_icd.md").read_text()
     assert "](../diagrams/sample_app_class.puml)" in icd
     assert (out / ".archdoc" / "icd_snapshot.json").exists()
-    assert "sequence: needs an LLM backend" in capsys.readouterr().out
+    assert "sequence: needs an LLM" in capsys.readouterr().out
 
 
 def test_cli_icd_per_interface(tmp_path):

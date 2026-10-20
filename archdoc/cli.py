@@ -8,16 +8,23 @@ import os
 import sys
 from collections import Counter
 
-from .egress import EgressAborted, build_payload, estimate_tokens
+import re
+import time
+
+from .backends import make_backend
+from .egress import EgressAborted, EgressLog, build_payload, estimate_tokens
 from .extract import extract_python
 from .extract.python_ast import collect_python_files
 from .policy import PolicyError, load_config
 from .pseudonym import AliasMap
-from .render.icd import anchor, build_icd_context, inventory_snapshot, render_icd
+from .plan.artifacts import PlanContext, plan_narrative, plan_sequence
+from .plan.entries import select_entries
+from .render.icd import anchor, apply_narrative, build_icd_context, inventory_snapshot, render_icd
+from .render.puml.sequence import render_sequence_diagram
 from .render.puml import render_class_diagram, render_component_diagram
 from .render.puml.class_ import partition_modules
 from .validate import check_syntax, plantuml_command
-from .trust import TIERS, TrustError, classify
+from .trust import CLOUD, TIERS, Backend, TrustError, classify
 
 
 def _state_dir(output: str) -> str:
@@ -111,7 +118,76 @@ def cmd_egress(args: argparse.Namespace) -> int:
 
 
 DETERMINISTIC_DIAGRAMS = ("class", "component")
-LLM_DIAGRAMS = ("sequence", "activity", "state", "usecase", "deployment", "object")
+PLANNED_DIAGRAMS = ("sequence",)
+LLM_DIAGRAMS = PLANNED_DIAGRAMS + ("activity", "state", "usecase", "deployment", "object")
+DEFAULT_URLS = {"ollama": "http://localhost:11434"}
+
+
+def _llm_context(args, cfg, ir):
+    """PlanContext for --backend / --model, or None when no LLM was requested."""
+    if getattr(args, "backend", None):
+        backend = cfg.backend(args.backend)
+    elif getattr(args, "model", None):
+        backend = Backend(
+            name="adhoc", url=args.url or DEFAULT_URLS.get(args.kind), model=args.model,
+            trust=args.trust, kind=args.kind, num_ctx=args.num_ctx,
+        )
+    else:
+        return None
+    decision = classify(backend, cfg.local_hosts, cfg.cloud_model_patterns)
+    tier = decision.tier
+    if args.backend and args.trust == CLOUD:
+        tier, decision.reasons = CLOUD, decision.reasons + ["forced with --trust cloud"]
+    elif args.backend and args.trust and args.trust != tier:
+        raise TrustError(f"backend {backend.name!r} classifies as {tier}; --trust can only make it stricter")
+    state = _state_dir(args.output)
+    alias_path = os.path.join(state, "alias_map.json")
+    ctx = PlanContext(
+        ir=ir, config=cfg, tier=tier, aliases=AliasMap.load(alias_path),
+        backend=make_backend(backend),
+        log=EgressLog(os.path.join(state, "egress.jsonl")),
+        depth=args.depth, max_nodes=args.max_nodes, alias_path=alias_path,
+    )
+    print(f"  LLM: {backend.model} via {backend.kind} @ {backend.url or 'in-process'} "
+          f"(tier {tier}: {'; '.join(decision.reasons)})")
+    return ctx
+
+
+def _save_plan(args, artifact: str, plan) -> None:
+    path = os.path.join(_state_dir(args.output), "plans", re.sub(r"[^A-Za-z0-9_.-]+", "_", artifact) + ".json")
+    _write(path, json.dumps(plan, indent=1, ensure_ascii=False))
+
+
+def _sequence_files(ir, args, llm):
+    """[(stem, title, text)] for LLM-planned sequence diagrams."""
+    out = []
+    try:
+        entries = select_entries(ir, args.entry, args.max_entries, args.depth, args.max_nodes)
+    except ValueError as exc:
+        raise PolicyError(str(exc)) from None
+    if not entries:
+        print("  [SKIP] sequence: no entry points with internal calls found (use --entry)")
+    for e in entries:
+        t0 = time.monotonic()
+        result = plan_sequence(llm, e)
+        took = time.monotonic() - t0
+        if not result.ok:
+            print(f"  [FAIL] sequence for {e.label}: {'; '.join(result.errors[:3])} "
+                  f"({result.attempts} attempt(s), {took:.0f}s)")
+            continue
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", e.handler.split(":", 1)[1]).strip("_")
+        stem = f"{ir.repo}_sequence_{slug}"
+        client = "User" if e.via and e.via[0].kind == "cli" else "Client"
+        aliased = llm.config.policy_for(llm.tier).pseudonymize != "off"
+        text, warnings = render_sequence_diagram(
+            ir, result.plan, stem, client_name=client, code_labels=aliased,
+            title=f"{e.via[0].name}: {e.via[1].name}" if aliased and e.via else (e.label if aliased else None))
+        _save_plan(args, f"sequence_{slug}", result.plan)
+        for w in result.warnings + warnings:
+            print(f"  [WARN] {stem}: {w}")
+        out.append((stem, f"{ir.repo}: {result.plan.get('title') or e.label}", text,
+                    f"({result.attempts} attempt(s), {took:.0f}s)"))
+    return out
 
 
 def _write(path: str, text: str) -> str:
@@ -140,25 +216,31 @@ def _diagram_files(ir, types, depth, max_classes, members):
     return out
 
 
-def _generate_diagrams(ir, args) -> list:
+def _generate_diagrams(ir, args, llm=None) -> list:
     types = [t.strip() for t in args.types.split(",") if t.strip()]
-    pending = [t for t in types if t in LLM_DIAGRAMS]
     unknown = [t for t in types if t not in DETERMINISTIC_DIAGRAMS + LLM_DIAGRAMS]
     if unknown:
         raise PolicyError(f"unknown diagram type(s): {', '.join(unknown)}")
-    if pending:
-        print(f"  [SKIP] {', '.join(pending)}: needs an LLM backend (not implemented yet)")
+    later = [t for t in types if t in LLM_DIAGRAMS and t not in PLANNED_DIAGRAMS]
+    if later:
+        print(f"  [SKIP] {', '.join(later)}: not implemented yet")
+    planned = [t for t in types if t in PLANNED_DIAGRAMS]
+    if planned and llm is None:
+        print(f"  [SKIP] {', '.join(planned)}: needs an LLM (--backend NAME or --model MODEL)")
+    files = [(*f, "") for f in _diagram_files(ir, types, args.component_depth, args.max_classes, args.members)]
+    if "sequence" in planned and llm is not None:
+        files += _sequence_files(ir, args, llm)
     written = []
     validate = not args.no_validate and plantuml_command() is not None
     failures = 0
-    for stem, title, text in _diagram_files(ir, types, args.component_depth, args.max_classes, args.members):
+    for stem, title, text, note in files:
         path = _write(os.path.join(args.output, "diagrams", f"{stem}.puml"), text)
         status = ""
         if validate:
             res = check_syntax(text)
             status = "  syntax OK" if res.ok else f"  SYNTAX ERROR line {res.line}: {res.message}"
             failures += not res.ok
-        print(f"  wrote {path}{status}")
+        print(f"  wrote {path}{status}{'  ' + note if note else ''}")
         written.append({"title": title, "path": path})
     if not validate and not args.no_validate:
         print("  (PlantUML not found: set PLANTUML_JAR or put `plantuml` on PATH to syntax-check)")
@@ -167,12 +249,31 @@ def _generate_diagrams(ir, args) -> list:
     return written
 
 
-def _generate_icd(ir, args, diagrams=None) -> None:
+def _narrate(llm, ctx, ifaces) -> None:
+    for iface in ifaces:
+        t0 = time.monotonic()
+        result = plan_narrative(llm, iface)
+        took = time.monotonic() - t0
+        if result.ok:
+            n = apply_narrative(ctx, iface.id, result.plan)
+            print(f"  narrative for {iface.name}: {n} item(s) filled "
+                  f"({result.attempts} attempt(s), {took:.0f}s)")
+        else:
+            print(f"  [FAIL] narrative for {iface.name}: {'; '.join(result.errors[:3])}")
+
+
+def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
     icd_dir = os.path.join(args.output, "icd")
     links = [{"title": d["title"], "path": os.path.relpath(d["path"], icd_dir)} for d in (diagrams or [])]
     generated = None if args.no_date else __import__("datetime").date.today().isoformat()
+    if args.narrative and llm is None:
+        print("  [SKIP] narrative: needs an LLM (--backend NAME or --model MODEL)")
+    narrate = args.narrative and llm is not None
     if args.scope == "system":
         ctx = build_icd_context(ir, diagrams=links, generated=generated)
+        if narrate:
+            ctx["narrative_aliased"] = llm.config.policy_for(llm.tier).pseudonymize != "off"
+            _narrate(llm, ctx, ir.interfaces)
         path = _write(os.path.join(icd_dir, f"{ir.repo}_icd.md"), render_icd(ctx, args.template))
         print(f"  wrote {path}  ({ctx['summary']['interfaces']} interfaces, "
               f"{ctx['summary']['operations']} operations, {len(ctx['gaps'])} open items)")
@@ -180,6 +281,9 @@ def _generate_icd(ir, args, diagrams=None) -> None:
         for iface in ir.interfaces:
             ctx = build_icd_context(ir, [iface], title=f"{iface.name} Interface Control Document",
                                     diagrams=links, generated=generated)
+            if narrate:
+                ctx["narrative_aliased"] = llm.config.policy_for(llm.tier).pseudonymize != "off"
+                _narrate(llm, ctx, [iface])
             path = _write(os.path.join(icd_dir, f"{anchor(iface.id)}.md"), render_icd(ctx, args.template))
             print(f"  wrote {path}")
     snap = os.path.join(_state_dir(args.output), "icd_snapshot.json")
@@ -187,10 +291,19 @@ def _generate_icd(ir, args, diagrams=None) -> None:
         json.dump(inventory_snapshot(ir), fh, indent=1)
 
 
+def _finish_llm(llm) -> None:
+    if llm is not None:
+        llm.aliases.save(llm.alias_path)
+
+
 def cmd_diagrams(args: argparse.Namespace) -> int:
     cfg = load_config(args.repo, extra=args.config)
     ir = extract_python(args.repo, exclude=cfg.exclude + args.exclude)
-    _generate_diagrams(ir, args)
+    llm = _llm_context(args, cfg, ir)
+    try:
+        _generate_diagrams(ir, args, llm)
+    finally:
+        _finish_llm(llm)
     return 0
 
 
@@ -200,16 +313,24 @@ def cmd_icd(args: argparse.Namespace) -> int:
     if not ir.interfaces:
         print(f"{ir.repo}: no interfaces detected; nothing to document")
         return 0
-    _generate_icd(ir, args)
+    llm = _llm_context(args, cfg, ir)
+    try:
+        _generate_icd(ir, args, llm=llm)
+    finally:
+        _finish_llm(llm)
     return 0
 
 
 def cmd_all(args: argparse.Namespace) -> int:
     cfg = load_config(args.repo, extra=args.config)
     ir = extract_python(args.repo, exclude=cfg.exclude + args.exclude)
-    diagrams = _generate_diagrams(ir, args)
-    if ir.interfaces:
-        _generate_icd(ir, args, diagrams)
+    llm = _llm_context(args, cfg, ir)
+    try:
+        diagrams = _generate_diagrams(ir, args, llm)
+        if ir.interfaces:
+            _generate_icd(ir, args, diagrams, llm)
+    finally:
+        _finish_llm(llm)
     return 0
 
 
@@ -221,9 +342,26 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--config", help="Extra config TOML (overrides user and repo config)")
 
 
+def _add_llm_opts(p: argparse.ArgumentParser) -> None:
+    g = p.add_argument_group("LLM (optional; needed for sequence diagrams and ICD narrative)")
+    who = g.add_mutually_exclusive_group()
+    who.add_argument("--backend", help="Backend name from config")
+    who.add_argument("--model", help="Ad-hoc backend model, e.g. mistral-nemo:12b")
+    g.add_argument("--url", help="Ad-hoc backend URL (default for ollama: http://localhost:11434)")
+    g.add_argument("--kind", choices=("ollama", "openai"), default="ollama", help="Ad-hoc backend API")
+    g.add_argument("--num-ctx", type=int, help="Ollama context window (default 8192)")
+    g.add_argument("--trust", choices=TIERS,
+                   help="Ad-hoc: declared tier (undeclared = cloud). Named backend: 'cloud' forces aliasing")
+    g.add_argument("--entry", action="append", default=[],
+                   help="Sequence entry: handler id (pkg.mod:func) or operation id (repeatable)")
+    g.add_argument("--max-entries", type=int, default=3, help="Sequence diagrams to plan when no --entry")
+    g.add_argument("--depth", type=int, default=3, help="Call-graph depth for sequence slices")
+    g.add_argument("--max-nodes", type=int, default=25, help="Max functions per sequence slice")
+
+
 def _add_diagram_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--types", default="class,component",
-                   help=f"Comma-separated diagram types (available now: {', '.join(DETERMINISTIC_DIAGRAMS)})")
+                   help="Comma-separated: class, component (no LLM); sequence (LLM)")
     p.add_argument("--component-depth", type=int, help="Package depth for components (default: auto)")
     p.add_argument("--max-classes", type=int, default=60,
                    help="Above this many classes, write one class diagram per component")
@@ -236,6 +374,7 @@ def _add_icd_opts(p: argparse.ArgumentParser) -> None:
                    help="One ICD for the system, or one per interface")
     p.add_argument("--template", default="lightweight", help="Bundled template name or path to a .j2 file")
     p.add_argument("--no-date", action="store_true", help="Omit the generation date (reproducible output)")
+    p.add_argument("--narrative", action="store_true", help="Fill TBD descriptions with the LLM")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -268,17 +407,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("diagrams", help="Write PlantUML diagrams")
     _add_common(p)
     _add_diagram_opts(p)
+    _add_llm_opts(p)
     p.set_defaults(func=cmd_diagrams)
 
     p = sub.add_parser("icd", help="Write Interface Control Document(s)")
     _add_common(p)
     _add_icd_opts(p)
+    _add_llm_opts(p)
     p.set_defaults(func=cmd_icd)
 
     p = sub.add_parser("all", help="Diagrams and ICDs from one extraction")
     _add_common(p)
     _add_diagram_opts(p)
     _add_icd_opts(p)
+    _add_llm_opts(p)
     p.set_defaults(func=cmd_all)
     return ap
 

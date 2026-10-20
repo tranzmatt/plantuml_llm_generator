@@ -41,6 +41,9 @@ class Backend:
     model: Optional[str] = None
     trust: Optional[str] = None        # declared tier; None means cloud
     api_key_env: Optional[str] = None  # name of the env var holding the key, never the key
+    kind: str = "openai"               # openai (OpenAI-compatible) | ollama (native API)
+    num_ctx: Optional[int] = None      # ollama: context window per request
+    timeout: int = 600                 # seconds; first calls may include a cold model load
 
 
 @dataclass

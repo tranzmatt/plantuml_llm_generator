@@ -56,8 +56,9 @@ class _Builder:
         self.referenced: List[str] = []
         self.gaps: List[Dict[str, str]] = []
 
-    def gap(self, where: str, what: str, link: Optional[str] = None) -> None:
-        self.gaps.append({"where": where, "what": what, "anchor": link or ""})
+    def gap(self, where: str, what: str, link: Optional[str] = None, key: Optional[str] = None) -> None:
+        """`key` lets narrative close the gap: purpose:<iface>, op:<op>, param:<op>:<name>."""
+        self.gaps.append({"where": where, "what": what, "anchor": link or "", "key": key or ""})
 
     def ref_type(self, type_id: Optional[str]) -> None:
         if type_id and type_id in self.data_types and type_id not in self.referenced:
@@ -75,10 +76,10 @@ class _Builder:
     def type_ref(self, t: Optional[TypeRef]) -> Optional[Dict[str, Any]]:
         return self.type_cell(t.display, t.type_id) if t else None
 
-    def param(self, f: Field, where: str, link: str) -> Dict[str, Any]:
+    def param(self, f: Field, where: str, link: str, op_id: str = "") -> Dict[str, Any]:
         desc = f.docstring
         if not desc:
-            self.gap(where, f"description of `{f.name}`", link)
+            self.gap(where, f"description of `{f.name}`", link, key=f"param:{op_id}:{f.name}")
         if not f.annotation:
             self.gap(where, f"type of `{f.name}`", link)
         return {
@@ -90,6 +91,7 @@ class _Builder:
             "default": f.default,
             "constraints": _constraints_text(f),
             "description": desc,
+            "description_generated": False,
         }
 
     def operation(self, iface: Interface, op: Operation) -> Dict[str, Any]:
@@ -97,15 +99,15 @@ class _Builder:
         where = f"{iface.name} / {op.name}"
         summary = _first_paragraph(op.docstring)
         if not summary:
-            self.gap(where, "operation description", link)
+            self.gap(where, "operation description", link, key=f"op:{op.id}")
         out = {
             "id": op.id,
             "anchor": link,
             "name": op.name,
             "handler": op.handler,
             "summary": summary,
-            "semantics": None,             # narrative (Phase 3)
-            "params": [self.param(p, where, link) for p in op.params],
+            "summary_generated": False,
+            "params": [self.param(p, where, link, op.id) for p in op.params],
             "request": self.type_ref(op.request),
             "response": self.type_ref(op.response),
             "errors": op.errors,
@@ -119,7 +121,7 @@ class _Builder:
 
     def interface(self, iface: Interface) -> Dict[str, Any]:
         link = anchor(iface.id)
-        self.gap(iface.name, "interface purpose", link)
+        self.gap(iface.name, "interface purpose", link, key=f"purpose:{iface.id}")
         for g in STANDARD_GAPS.get(iface.kind, []):
             self.gap(iface.name, g, link)
         return {
@@ -132,7 +134,8 @@ class _Builder:
             "owner": iface.owner,
             "protocol": iface.protocol,
             "address": iface.address,
-            "purpose": None,               # narrative (Phase 3)
+            "purpose": None,               # narrative: apply_narrative()
+            "purpose_generated": False,
             "operations": [self.operation(iface, op) for op in iface.operations],
             "source_refs": iface.source_refs,
         }
@@ -193,8 +196,45 @@ def build_icd_context(
         "interfaces": ifaces,
         "data_types": dts,
         "gaps": b.gaps,
+        "generated_items": 0,
+        "narrative_aliased": False,
         "diagrams": diagrams or [],
     }
+
+
+def apply_narrative(context: Dict[str, Any], interface_id: str, narrative: Dict[str, Any]) -> int:
+    """Fill TBD slots of one interface from a restored narrative plan.
+
+    Only empty slots are filled (code docstrings always win); filled values are
+    flagged *_generated and their open items removed. Returns slots filled.
+    """
+    iface = next((i for i in context["interfaces"] if i["id"] == interface_id), None)
+    if iface is None:
+        return 0
+    closed: Set[str] = set()
+    purpose = (narrative.get("purpose") or "").strip()
+    if purpose and not iface["purpose"]:
+        iface["purpose"], iface["purpose_generated"] = purpose, True
+        closed.add(f"purpose:{interface_id}")
+    ops = {o["id"]: o for o in iface["operations"]}
+    for item in narrative.get("operations", []):
+        op = ops.get(item.get("ref"))
+        if op is None:
+            continue
+        summary = (item.get("summary") or "").strip()
+        if summary and not op["summary"]:
+            op["summary"], op["summary_generated"] = summary, True
+            closed.add(f"op:{op['id']}")
+        params = {p["name"]: p for p in op["params"]}
+        for pn in item.get("params", []):
+            p = params.get(pn.get("name"))
+            desc = (pn.get("description") or "").strip()
+            if p is not None and desc and not p["description"]:
+                p["description"], p["description_generated"] = desc, True
+                closed.add(f"param:{op['id']}:{p['name']}")
+    context["gaps"] = [g for g in context["gaps"] if not g.get("key") or g["key"] not in closed]
+    context["generated_items"] = context.get("generated_items", 0) + len(closed)
+    return len(closed)
 
 
 def inventory_snapshot(ir: RepoIR) -> Dict[str, Any]:

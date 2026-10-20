@@ -190,10 +190,12 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
     cfg.cloud_model_patterns = list(trust.get("cloud_model_patterns", DEFAULT_CLOUD_MODEL_PATTERNS))
 
     for name, b in data.get("backends", {}).items():
-        unknown = set(b) - {"url", "model", "trust", "api_key_env"}
+        unknown = set(b) - {"url", "model", "trust", "api_key_env", "kind", "num_ctx", "timeout"}
         if unknown:
             raise PolicyError(f"{src}: [backends.{name}] unknown key(s) {', '.join(sorted(unknown))}")
         if "api_key" in b:
             raise PolicyError(f"{src}: put the key in an env var and set api_key_env instead")
+        if b.get("kind", "openai") not in ("openai", "ollama"):
+            raise PolicyError(f"{src}: [backends.{name}] kind must be 'openai' or 'ollama'")
         cfg.backends[name] = Backend(name=name, **b)
     return cfg

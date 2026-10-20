@@ -623,7 +623,7 @@ to `legacy/`.
 
 ## 16. Phased plan
 
-Status: Phases 0, 1 and 2 are complete on the feature branch.
+Status: Phases 0 to 3 are complete on the feature branch.
 
 Notes from implementation:
 
@@ -641,6 +641,32 @@ Notes from implementation:
   worklist for the Phase 3 narrative step. Data types are included when
   referenced by an interface, transitively through fields.
 - `archdoc icd` saves `.archdoc/icd_snapshot.json` for the Phase 6 drift check.
+- **Phase 3 backends:** Ollama uses its native `/api/chat` (schema-constrained
+  `format` and a per-request `num_ctx`, which the OpenAI-compatible endpoint can't
+  set). vLLM and cloud APIs use OpenAI-compatible `response_format: json_schema`.
+  Both use only the standard library.
+- **Schemas constrain references:** every ref field is an enum of exactly the refs
+  the payload exposed. A schema-enforcing backend cannot name anything it was not
+  shown, and ingress still rejects unknown aliases for servers that ignore enums.
+- **Calls are recorded in source order** (first occurrence). This adds order
+  only, no new content, and it is what makes sequence diagrams follow the code.
+- **Sequence plans are normalized after validation** to remove what a static
+  call graph cannot support. A call is never drawn as a return arrow. `alt`/`opt`
+  groups need a raising function in the slice, and `loop` needs control-flow data
+  (Phase 4). Unused participants are dropped. A 12B model reliably invents all
+  three otherwise.
+- **Pseudonymized runs use code labels:** when the model saw aliases, call
+  messages are labelled with the real function name and titles come from the
+  entry point. Measured on the fixture: with names hidden, mistral-nemo invented
+  an "Order Processing Flow: Place Order → Check Inventory" for what is really
+  build_repo → get → get. The model still decides flow, order and kinds.
+- **ICD narrative** fills only empty slots (code docstrings always win), is marked
+  *(generated)*, closes the matching open items, and the banner states when
+  the model only saw pseudonymized input. The prompt forbids claiming
+  operations the input does not list (a 12B model otherwise "adds" CRUD).
+- **Measured** (mistral-nemo:12b, RTX 3060, Ollama): this repo's 2 sequence
+  diagrams + narrative for 14 interfaces took 16 requests, all valid on the first
+  attempt, largest prompt 3,138 tokens, ~4 minutes. Open items dropped from 110 to 36.
 
 | Phase | Deliverable | Exit criteria |
 |-------|-------------|---------------|
