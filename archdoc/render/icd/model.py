@@ -20,6 +20,7 @@ KIND_LABELS = {
     "cli": "Command-line interface",
     "env": "Environment configuration",
     "message": "Messaging",
+    "ui": "User interface",
     "rpc": "RPC",
     "library": "Library API",
     "file": "File interface",
@@ -31,6 +32,8 @@ STANDARD_GAPS = {
     "http": ["Authentication / authorization", "Rate limits and timeouts", "API versioning policy"],
     "cli": ["Exit codes", "Required runtime environment"],
     "env": ["Value formats and units", "Which variables are secrets"],
+    "message": ["Message schema versioning", "Delivery guarantees and retry / dead-letter handling"],
+    "ui": ["Authentication / access control", "Supported browsers / clients"],
 }
 
 
@@ -108,6 +111,7 @@ class _Builder:
             "summary": summary,
             "summary_generated": False,
             "params": [self.param(p, where, link, op.id) for p in op.params],
+            "outputs": [{"name": f.name, "type": self.type_cell(f.annotation, f.type_id)} for f in op.outputs],
             "request": self.type_ref(op.request),
             "response": self.type_ref(op.response),
             "errors": op.errors,

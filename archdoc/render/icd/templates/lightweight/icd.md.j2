@@ -87,9 +87,26 @@
 {% if op.meta.get("tags") %}
 - **Tags:** {{ op.meta.get("tags") }}
 {% endif %}
+{% if i.kind == "message" %}
+{% for k, label in [("role", "Role"), ("queue", "Queue"), ("exchange", "Exchange"), ("exchange_type", "Exchange type"), ("routing_key", "Routing key"), ("delivery", "Delivery"), ("ack", "Acknowledgement"), ("content_type", "Content type"), ("persistent", "Persistent"), ("correlation_id", "Correlation id"), ("reply_to", "Reply-to"), ("mandatory", "Mandatory")] -%}
+{% if op.meta.get(k) %}
+- **{{ label }}:** {{ op.meta.get(k) | code }}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if op.outputs %}
+- **Outputs:** {% for o in op.outputs %}{{ o.name | code }} ({{ o.type | typecell }}){% if not loop.last %}, {% endif %}{% endfor %}
+
+{% endif %}
 
 {% if op.params %}
-{% if i.kind == "cli" %}
+{% if i.kind == "message" %}
+| Field | Type | Description |
+|-------|------|-------------|
+{% for p in op.params -%}
+| {{ p.name | code }} | {{ p.type | typecell }} | {{ p.description | tbd }}{% if p.description_generated %} *(generated)*{% endif %} |
+{% endfor %}
+{% elif i.kind == "cli" %}
 | Argument | Type | Required | Default | Constraints | Description |
 |----------|------|----------|---------|-------------|-------------|
 {% for p in op.params -%}
@@ -160,6 +177,22 @@ missing from this document.
 | {{ u.module | code }} | {{ u.description }} (`{{ u.library }}`) | {{ u.kind }} | {{ u.direction }} |
 {% endfor %}
 {% endif %}
+{% if coverage and coverage.message_wiring %}
+
+<a id="appendix-a3"></a>
+### A.3 Message channels with a missing end
+
+Each channel below has a publisher without a consumer, a consumer without a
+publisher, or a consumer reading fields no publisher sends. The other end is
+either outside this repository or the code is unused; this document cannot
+tell which.
+
+| Channel | Issue | Modules |
+|---------|-------|---------|
+{% for w in coverage.message_wiring -%}
+| {{ w.channel | code }} | {{ w.issue | cell }} | {{ w.modules | cell }} |
+{% endfor %}
+{% endif %}
 {% if coverage %}
 
 ## Appendix C. Coverage
@@ -172,7 +205,8 @@ missing from this document.
 | Data field descriptions | {{ coverage.data_fields.total }} | {{ coverage.data_fields.from_code }} | {{ coverage.data_fields.generated }} | {{ coverage.data_fields.tbd }} |
 
 Interface technologies used but not extracted: **{{ coverage.known_unknowns | length }}**.
-{% endif %}
+{% if coverage.message_wiring is defined %}Message channels with a missing end: **{{ coverage.message_wiring | length }}**.
+{% endif %}{% endif %}
 {% if diagrams %}
 
 ## Appendix B. Diagrams

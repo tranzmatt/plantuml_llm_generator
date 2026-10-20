@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from typing import Optional
+from typing import Iterator, List, Optional
 
 from ...interfaces import TypeRef
 from ..python_ast import ExtractContext, ParsedModule, dotted_name
@@ -27,3 +27,12 @@ def type_ref(ctx: ExtractContext, pm: ParsedModule, node: Optional[ast.AST]) -> 
     types = ctx.resolver.annotation_types(pm, node)
     linked = next((t for t in types if t in data_type_ids), None)
     return TypeRef(display=ast.unparse(node), type_id=linked)
+
+
+def scope_nodes(body: List[ast.stmt]) -> Iterator[ast.AST]:
+    """Walk a scope's statements in source order without entering nested defs."""
+    for stmt in body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for n in ast.walk(stmt):
+            yield n

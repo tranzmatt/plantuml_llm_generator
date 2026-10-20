@@ -393,6 +393,19 @@ def test_live_ollama(ir, tier):
 
 # -- servers that do not enforce the schema ------------------------------------------
 
+def test_alias_examples_only_reach_models_that_see_aliases(ir):
+    # llama4:scout copied the "@C3"/"@L4" examples into labels when shown them
+    # alongside real names
+    for tier, expect in (("local", False), ("cloud", True)):
+        ctx = _ctx(ir, tier, sequence_responder)
+        plan_sequence(ctx, _entry(ir))
+        ctx.backend.respond = narrative_responder
+        plan_narrative(ctx, ir.interfaces[0])
+        for c in ctx.backend.calls:
+            prose = c["system"].split("RESPONSE FORMAT", 1)[0] + c["user"].split("INPUT:\n", 1)[0]
+            assert bool(re.search(r"@[A-Z]\d", prose)) is expect, tier
+
+
 def test_response_format_is_in_the_prompt(ir):
     ctx = _ctx(ir, "cloud", sequence_responder)
     plan_sequence(ctx, _entry(ir, "shop.cli:cmd_serve"))
@@ -631,3 +644,14 @@ def test_ids_in_labels_render_as_short_names(ir):
     plan["messages"][1]["label"] = "call @shop.repo:ItemRepo.get for shop.models:Item"
     text, _ = render_sequence_diagram(ir, plan, "s")
     assert "P_shop_api -> P_shop_repo_ItemRepo : call ItemRepo.get for Item" in text
+
+
+def test_misspelled_names_in_labels_are_corrected():
+    from archdoc.plan.artifacts import correct_misspelled_names
+    ids = ["shop.cli:main", "shop.repo:Database.query", "shop.repo:ItemRepo.get"]
+    plan = {"title": "", "groups": [{"label": "if ItemRepo.gte fails"}],
+            "messages": [{"label": "Dtaabase.query"}, {"label": "maxn reply"}, {"label": "return items"}]}
+    warnings = correct_misspelled_names(None, plan, ids)
+    assert [m["label"] for m in plan["messages"]] == ["Database.query", "main reply", "return items"]
+    assert plan["groups"][0]["label"] == "if ItemRepo.get fails"
+    assert len(warnings) == 3

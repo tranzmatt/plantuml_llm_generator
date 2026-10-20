@@ -1,24 +1,37 @@
-"""Prompts for the planner. The model only ever sees an egress payload."""
+"""
+Prompts for the planner. The model only ever sees an egress payload.
 
-COMMON_RULES = """\
+The alias rules are only included when the payload is pseudonymized: shown to a
+model reading real names, their example references get copied verbatim.
+"""
+
+from typing import Tuple
+
+_BASE_RULES = """\
 - You see signatures and structure only, never implementation code.
-- Identifiers may be opaque references such as @C3, @F12 or @L4. Copy them
-  exactly as given; never invent, rename or expand them.
-- When identifiers are opaque references, write free text in terms of them
-  (e.g. "@F12 loads @C3 from @C7"): each reference is replaced with the real
-  name afterwards. Do not guess what the system is about or invent domain
-  words; text that mentions no reference cannot be mapped back and is discarded.
+- Copy refs exactly as they appear in the input; never invent, rename or expand them.
 - Do not invent behavior, protocols, security mechanisms, performance figures
   or components that the input does not show.
 - Return only JSON matching the required schema."""
 
-SEQUENCE_SYSTEM = f"""\
+_ALIAS_RULES = """
+- Identifiers are opaque references such as @C3, @F12 or @L4. Write free text
+  in terms of them (e.g. "@F12 loads @C3 from @C7"): each reference is replaced
+  with the real name afterwards. Do not guess what the system is about or
+  invent domain words; text that mentions no reference cannot be mapped back
+  and is discarded."""
+
+
+def common_rules(aliased: bool) -> str:
+    return _BASE_RULES + (_ALIAS_RULES if aliased else "")
+
+
+_SEQUENCE_ROLE = """\
 You are a software architect drawing a UML sequence diagram from a static
 call-graph slice of a code base.
+"""
 
-{COMMON_RULES}"""
-
-SEQUENCE_INSTRUCTIONS = """\
+_SEQUENCE_INSTRUCTIONS = """\
 The input describes one entry point:
 - "entry": the handler function and, if any, the interface operation that reaches it
 - "participants": classes or modules that own the functions in the slice
@@ -34,7 +47,7 @@ Produce a sequence diagram plan:
   order. A message for a call has "call" set to the called function's ref and a
   short label naming the action, and reply=false. For a third-party call, send
   the message to the caller itself (a self-call) with a label naming the library.
-  Build labels from the refs involved (e.g. "create @C2, then @F3").
+  {label_hint}
   Use reply=true only for a few returns worth showing (e.g. the final response
   to client); a reply has call "".
   Keep it readable: at most about 15 messages; skip trivial helpers.
@@ -46,13 +59,12 @@ Produce a sequence diagram plan:
 INPUT:
 """
 
-NARRATIVE_SYSTEM = f"""\
+_NARRATIVE_ROLE = """\
 You are a technical writer filling in an Interface Control Document from an
 interface's structure.
+"""
 
-{COMMON_RULES}"""
-
-NARRATIVE_INSTRUCTIONS = """\
+_NARRATIVE_INSTRUCTIONS = """\
 The input describes one interface: its operations (with parameters), the
 handler functions' signatures and docstrings, and the data types exchanged.
 
@@ -71,3 +83,13 @@ refer to the interface by what it does.
 
 INPUT:
 """
+
+
+def sequence_prompts(aliased: bool) -> Tuple[str, str]:
+    hint = ('Build labels from the refs involved (e.g. "create @C2, then @F3").' if aliased
+            else "Name labels after the functions and classes involved.")
+    return _SEQUENCE_ROLE + "\n" + common_rules(aliased), _SEQUENCE_INSTRUCTIONS.replace("{label_hint}", hint)
+
+
+def narrative_prompts(aliased: bool) -> Tuple[str, str]:
+    return _NARRATIVE_ROLE + "\n" + common_rules(aliased), _NARRATIVE_INSTRUCTIONS

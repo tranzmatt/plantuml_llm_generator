@@ -24,7 +24,8 @@ class TypeRef:
 class Operation:
     id: str
     name: str                          # "POST /invoices/{id}", "export", "INVOICE_DB_URL"
-    params: List["Field"] = field(default_factory=list)   # path/query params, CLI options
+    params: List["Field"] = field(default_factory=list)   # path/query params, CLI options, message fields
+    outputs: List["Field"] = field(default_factory=list)  # named outputs, e.g. the UI components a handler fills
     request: Optional[TypeRef] = None
     response: Optional[TypeRef] = None
     errors: List[str] = field(default_factory=list)       # status codes, exceptions, exit codes

@@ -5,6 +5,9 @@ Deterministic component diagram from the IR.
   - dependencies come from internal imports between groups
   - third-party libraries appear as <<external>> components
   - provided interfaces are lollipops (I - C); required ones are sockets (C -( I)
+  - message interfaces are drawn through the broker instead: each queue and
+    exchange the code names is a node, with publisher -> channel -> consumer
+    arrows, so the diagram shows who talks to whom
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import sys
 from typing import Dict, List, Optional, Set
 
 from ...interfaces import Interface
+from ...messaging import RUNTIME, channels
 from ...ir import EXTERNAL_PREFIX, RepoIR
 from .common import Aliases, Diagram, label
 
@@ -97,7 +101,10 @@ def render_component_diagram(
 
     iface_edges: List[str] = []
     if interfaces:
+        iface_edges += _message_channels(ir, diagram, aliases, group_by_module)
         for iface in ir.interfaces:
+            if iface.kind == "message":
+                continue
             ialias = aliases(iface.id, "I")
             diagram.add(f"interface {label(interface_label(iface))} as {ialias}")
             if iface.direction == "provided" and iface.owner in group_by_module:
@@ -119,3 +126,28 @@ def render_component_diagram(
     for e in iface_edges:
         diagram.edge(e)
     return diagram.text()
+
+
+def _message_channels(ir: RepoIR, diagram: Diagram, aliases: Aliases, group_by_module: Dict[str, str]) -> List[str]:
+    chans = channels(ir)
+    if not chans:
+        return []
+    edges: List[str] = []
+    for broker in sorted({c.broker for c in chans}):
+        diagram.add(f"node {label(broker)} as {aliases('broker:' + broker, 'B')} {{")
+        for c in (c for c in chans if c.broker == broker):
+            stereo = f"<<{c.exchange_type} exchange>>" if c.target == "exchange" and c.exchange_type else f"<<{c.target}>>"
+            diagram.add(f"  queue {label(c.name)} as {aliases(c.key, 'Q')} {stereo}")
+        diagram.add("}")
+    for c in chans:
+        q = aliases(c.key, "Q")
+        for role, ends in (("publish", c.publishers), ("consume", c.consumers)):
+            seen: Set[str] = set()
+            for e in ends:
+                g = group_by_module.get(e.module)
+                if g is None or g in seen:
+                    continue
+                seen.add(g)
+                key = f" : {'routing key set at run time' if e.routing_key == RUNTIME else e.routing_key}" if e.routing_key else ""
+                edges.append(f"{aliases(g, 'C')} --> {q}{key}" if role == "publish" else f"{q} --> {aliases(g, 'C')}{key}")
+    return edges

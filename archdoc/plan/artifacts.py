@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from ..backends import LLMBackend
 from ..egress import EgressLog, build_interface_payload, build_sequence_payload
@@ -94,6 +95,59 @@ def keep_grounded_labels(result: PlanResult) -> List[str]:
     return [f"cleared {cleared} label(s) written without any reference (not reversible)"] if cleared else []
 
 
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+
+
+def _osa_distance(a: str, b: str) -> int:
+    """Edit distance counting an adjacent transposition as one edit."""
+    d = [[i + j if i * j == 0 else 0 for j in range(len(b) + 1)] for i in range(len(a) + 1)]
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+    return d[-1][-1]
+
+
+def _names_in_slice(ir: RepoIR, ids: List[str]) -> List[str]:
+    names = set()
+    for fid in ids:
+        mod, _, qual = fid.partition(":")
+        names.update({mod, mod.rsplit(".", 1)[-1]})
+        if qual:
+            names.add(qual)
+            names.update(qual.split("."))
+    return sorted(n for n in names if len(n) >= 4)
+
+
+def correct_misspelled_names(ir: RepoIR, plan: Any, ids: List[str]) -> List[str]:
+    """A label word one or two edits away from a name in the slice is a copying
+    slip (llama4:scout wrote "Dtaabase.query" and "maxn"): a misspelled real
+    name reads as authoritative and is worse than none, so it is replaced with
+    the exact name. Only used when the model saw real names."""
+    known = _names_in_slice(ir, ids)
+    lower = {n.lower() for n in known}
+    fixed: Dict[str, str] = {}
+
+    def fix(text: str) -> str:
+        def repl(m: "re.Match[str]") -> str:
+            w = m.group(0)
+            if len(w) < 4 or w.lower() in lower or w.lower().rstrip("s") in lower:
+                return w
+            limit = 1 if len(w) <= 6 else 2
+            best = min(known, key=lambda n: (_osa_distance(w, n), n), default=None)
+            if best is not None and _osa_distance(w, best) <= limit:
+                fixed[w] = best
+                return best
+            return w
+        return _WORD_RE.sub(repl, text)
+
+    for item in plan["messages"] + plan["groups"]:
+        item["label"] = fix(item["label"])
+    plan["title"] = fix(plan["title"])
+    return [f"corrected misspelled name {w!r} -> {n!r}" for w, n in sorted(fixed.items())]
+
+
 def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
     """Plan, verify against the call graph, repair once, then prune what still fails."""
     ids = call_slice(ctx.ir, entry.handler, ctx.depth, ctx.max_nodes)
@@ -107,8 +161,8 @@ def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
         fix_reply_flags(plan)
         return [str(x) for x in verify_sequence(ctx.ir, plan, ids, entry.handler)]
 
-    result = run_plan(ctx.backend, payload, schema, prompts.SEQUENCE_SYSTEM, prompts.SEQUENCE_INSTRUCTIONS,
-                      ctx.aliases, validate=validate, log=ctx.log)
+    system, instructions = prompts.sequence_prompts(bool(ALIAS_RE.search(payload.text)))
+    result = run_plan(ctx.backend, payload, schema, system, instructions, ctx.aliases, validate=validate, log=ctx.log)
     passed_unaided = result.ok          # every check passed without pruning (maybe after a repair)
     if not result.ok and result.candidate is not None and not check_sequence(result.candidate):
         # still failing verification after repair: keep what verifies, drop the rest
@@ -118,6 +172,8 @@ def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
 
     fix_reply_flags(result.plan)
     result.warnings += keep_grounded_labels(result)          # indexes still match the raw answer
+    if not result.payload_aliased:
+        result.warnings += correct_misspelled_names(ctx.ir, result.plan, ids)
     removed, plan_issues = prune_sequence(ctx.ir, result.plan, ids, entry.handler)
     result.warnings += removed + [f"unresolved: {x}" for x in plan_issues]
     if not any(m.get("call") for m in result.plan["messages"]):
@@ -144,8 +200,8 @@ def check_narrative(plan: Any) -> List[str]:
 def plan_narrative(ctx: PlanContext, iface: Interface) -> PlanResult:
     payload = build_interface_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, iface)
     schema = narrative_schema(payload.allowed["operations"], payload.allowed["params"])
-    return run_plan(ctx.backend, payload, schema, prompts.NARRATIVE_SYSTEM, prompts.NARRATIVE_INSTRUCTIONS,
-                    ctx.aliases, validate=check_narrative, log=ctx.log)
+    system, instructions = prompts.narrative_prompts(bool(ALIAS_RE.search(payload.text)))
+    return run_plan(ctx.backend, payload, schema, system, instructions, ctx.aliases, validate=check_narrative, log=ctx.log)
 
 
 __all__ = ["CLIENT", "PlanContext", "check_narrative", "check_sequence", "drop_unused_participants",

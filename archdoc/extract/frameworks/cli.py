@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from ...interfaces import Interface, Operation
 from ...ir import EXTERNAL_PREFIX, Field
 from ..python_ast import ExtractContext, ParsedModule, dotted_name, literal_text, str_literal
-from ._common import call_target, kwarg
+from ._common import call_target, kwarg, scope_nodes
 
 _ARGPARSE_PARSER = f"{EXTERNAL_PREFIX}argparse.ArgumentParser"
 
@@ -30,15 +30,6 @@ def detect_argparse(ctx: ExtractContext) -> None:
                 ctx.ir.interfaces.append(iface)
 
 
-def _scope_nodes(body: List[ast.stmt]):
-    """Walk a scope's statements in source order without entering nested defs."""
-    for stmt in body:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        for n in ast.walk(stmt):
-            yield n
-
-
 def _argparse_in_scope(ctx, pm, scope_name, handler, body) -> List[Interface]:
     # parser var -> operation it feeds; subparsers-action vars; root parser vars
     ops: Dict[str, Operation] = {}
@@ -46,7 +37,7 @@ def _argparse_in_scope(ctx, pm, scope_name, handler, body) -> List[Interface]:
     subactions: Dict[str, str] = {}          # subparsers var -> root parser var
     sub_ops: Dict[str, List[Operation]] = {}  # root var -> subcommand operations
 
-    assigns = [n for n in _scope_nodes(body)
+    assigns = [n for n in scope_nodes(body)
                if isinstance(n, ast.Assign) and len(n.targets) == 1
                and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call)]
     for a in sorted(assigns, key=lambda n: (n.lineno, n.col_offset)):
@@ -76,7 +67,7 @@ def _argparse_in_scope(ctx, pm, scope_name, handler, body) -> List[Interface]:
     if not roots:
         return []
 
-    for n in _scope_nodes(body):
+    for n in scope_nodes(body):
         if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
             continue
         owner = dotted_name(n.func.value)

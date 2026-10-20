@@ -18,7 +18,7 @@ Payload JSON shape (keys kept short to save tokens):
                   "functions": [{"ref", "sig", "async"?, "doc"?, "decorators"?,
                                  "calls"?, "creates"?, "raises"?}]}],
      "interfaces": [{"ref", "kind", "dir", "owner", "protocol"?, "address"?, "name"?,
-                     "ops": [{"ref", "name"?, "params", "request"?, "response"?,
+                     "ops": [{"ref", "name"?, "params", "outputs"?, "request"?, "response"?,
                               "errors"?, "handler"?, "doc"?, "meta"?}]}]}
 """
 
@@ -47,6 +47,19 @@ _NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
 _QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 
 # Names that are never repo-specific and stay readable even under pseudonymize=all.
+# Operation meta whose values are protocol vocabulary, not anything about the
+# code: sent as is in every tier, so a model can tell a publisher from a consumer.
+_PROTOCOL_META = {
+    "role": {"publish", "consume"},
+    "delivery": {"push (basic_consume)", "poll (basic_get)"},
+    "ack": {"automatic", "manual"},
+    "exchange_type": {"direct", "fanout", "topic", "headers"},
+    "persistent": {"yes"}, "mandatory": {"yes"},
+    "correlation_id": {"set"}, "reply_to": {"set"},
+    "queue": {"exclusive, server-named"},
+    "content_type": {"application/json", "text/plain", "application/octet-stream"},
+}
+
 _SAFE_TYPE_NAMES = frozenset(dir(builtins)) | {
     "Any", "Optional", "Union", "List", "Dict", "Set", "FrozenSet", "Tuple", "Type", "Callable",
     "Iterable", "Iterator", "Generator", "AsyncIterator", "AsyncGenerator", "Awaitable", "Coroutine",
@@ -423,6 +436,9 @@ class _ViewBuilder:
         params = [self.field_view(p, mid, op.id) for p in op.params]
         if params:
             out["params"] = params
+        outputs = [self.field_view(p, mid, op.id) for p in op.outputs]
+        if outputs:
+            out["outputs"] = outputs
         for key, t in (("request", op.request), ("response", op.response)):
             v = self.type_ref_view(t, mid, op.id)
             if v:
@@ -437,7 +453,8 @@ class _ViewBuilder:
             out["doc"] = doc
         meta = {}
         for k, v in op.meta.items():
-            if k == "status_code":
+            if k == "status_code" or (k in _PROTOCOL_META and v in _PROTOCOL_META[k]) or (
+                    k == "component" and v.isidentifier()):     # a UI library class, e.g. Button
                 meta[k] = v
             elif k == "used_in":
                 meta[k] = [self.module_ref(x.strip()) for x in v.split(",") if x.strip()]

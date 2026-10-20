@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Set
 
 from .ir import EXTERNAL_PREFIX, RepoIR
+from .messaging import wiring_issues
 
 # import root -> (interface kind, direction, human description)
 INTERFACE_LIBRARIES: Dict[str, tuple] = {
@@ -146,6 +147,7 @@ def icd_coverage(context: Dict[str, Any], ir: RepoIR) -> Dict[str, Any]:
         "data_fields": _count([{**f, "description_generated": False} for f in fields], "description"),
         "open_items": len(context["gaps"]),
         "known_unknowns": [asdict(u) | {"text": u.text} for u in unknowns],
+        "message_wiring": wiring_issues(ir),
     }
 
 
@@ -164,4 +166,11 @@ def coverage_lines(cov: Dict[str, Any]) -> List[str]:
             lines.append(f"        {u['module']}: {u['description']}{lib}")
         if len(cov["known_unknowns"]) > 12:
             lines.append(f"        ... and {len(cov['known_unknowns']) - 12} more (see coverage.json)")
+    wiring = cov.get("message_wiring") or []
+    if wiring:
+        lines.append(f"  [GAP] {len(wiring)} message channel(s) with a missing end:")
+        for w in wiring[:12]:
+            lines.append(f"        {w['channel']}: {w['issue']} ({w['modules']})")
+        if len(wiring) > 12:
+            lines.append(f"        ... and {len(wiring) - 12} more (see coverage.json)")
     return lines
