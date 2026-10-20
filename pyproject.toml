@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "archdoc"
 version = "0.1.0"
 description = "Interface-only architecture documentation: PlantUML diagrams and ICDs from code"
-requires-python = ">=3.10"
+requires-python = ">=3.11"   # tomllib
 dependencies = []
 
 [project.optional-dependencies]

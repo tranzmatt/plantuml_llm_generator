@@ -90,7 +90,7 @@ Safety checks that run before any request:
 | Arbitrary string literals | never | never |
 | Module, class, function, param names | real | **pseudonymized** |
 | Type annotations | real | pseudonymized (internal types) |
-| Docstrings | full | none (opt-in: first line, pseudonymized) |
+| Docstrings | first line (opt-in: full) | none (opt-in: first line, pseudonymized) |
 | Interface literals: route paths, CLI flags, topic and queue names, field constraints | real | pseudonymized |
 | Default values | simple literals | presence only |
 | Control-flow skeletons | allowed | off (opt-in) |
@@ -243,30 +243,60 @@ Notes:
 
 ## 6. Policy
 
-Policy lives in `.archdoc.toml` at the target repo root (or `--policy path`).
-**Each tier has a built-in default profile (Section 3.3).** The file only states
-overrides, per tier.
+Configuration is read from up to three TOML files, each overriding the last:
+
+1. user config `~/.config/archdoc/config.toml`: backends and trust settings
+2. repo config `<repo>/.archdoc.toml`: policy and paths
+3. `--config path`
+
+**Each tier has a built-in default profile.** Files only state overrides, and
+unknown keys or values are errors (a typo must not silently loosen policy).
+
+| Key | Values | `local` default | `cloud` default |
+|-----|--------|-----------------|-----------------|
+| `level` | `none` · `interfaces` · `callgraph` · `control_flow` | `control_flow` | `callgraph` |
+| `pseudonymize` | `off` · `internal` · `all` | `off` | `internal` |
+| `docstrings` | `full` · `first_line` · `none` | `first_line` | `none` |
+| `interface_literals` | `real` · `alias` · `none` | `real` | `alias` |
+| `defaults` | `simple_literals` · `presence` · `none` | `simple_literals` | `presence` |
+| `members` | `all` · `public` | `public` | `public` |
+| `on_secret` | `drop` · `abort` | `drop` | `abort` |
+
+`interface_literals` covers route paths, CLI program/command/flag names, env var
+names, `Literal[...]` values, decorator arguments and non-numeric field constraints.
+`docstrings` defaults to `first_line` even locally: full docstrings were the
+largest single cost in measurements (about 25% of a local payload on pip).
 
 ```toml
-[policy.local]
-docstrings = "full"
-control_flow = true
+# ~/.config/archdoc/config.toml
+[trust]
+local_hosts = ["dgx.lan", "100.64.0.0/10"]   # hostnames, IPs or CIDRs (CGNAT needs listing)
 
+[backends.dgx]
+url = "http://10.0.0.5:8000/v1"
+model = "mistral-medium"
+trust = "local"
+
+[backends.claude]
+url = "https://api.anthropic.com"
+model = "claude-sonnet-5-5"
+trust = "cloud"
+api_key_env = "ANTHROPIC_API_KEY"            # name of the env var; keys are never stored in config
+
+# <repo>/.archdoc.toml
 [policy.cloud]
-pseudonymize = "internal"     # internal | all
-docstrings = "none"           # none | first_line
-interface_literals = "alias"  # alias | none
-control_flow = false
+docstrings = "first_line"
 
 [paths]
-exclude   = ["tests/**", "migrations/**", "vendor/**"]
-sensitive = ["src/pricing/**"]   # forced to cloud-tier policy even for local backends
+exclude   = ["tests/*", "migrations/*"]
+sensitive = ["src/pricing/*"]   # field-wise strictest of tier and cloud policy, even locally
 
 [secrets]
 scan = true
-on_hit_local = "drop"         # drop | abort
-on_hit_cloud = "abort"
 ```
+
+A symbol in a sensitive module is aliased *everywhere it is referenced*, including
+annotations, docstrings and decorator arguments in non-sensitive modules.
 
 ### 6.1 Egress levels
 
@@ -312,18 +342,25 @@ ICD prose, not just in JSON reference fields:
 | Class / type | `@C<n>` | `InvoiceReconciler` → `@C17` |
 | Function / method | `@F<n>` | `reconcile_ledger` → `@F42` |
 | Field / param | `@p<n>` | `ledger_id` → `@p8` |
-| Interface / operation | `@I<n>` / `@O<n>` | `POST /invoices/{id}` → `POST @O5` |
+| Interface / operation | `@I<n>` / `@O<n>` | ref `@O5`, displayed as `POST @L9` (the path is a literal) |
 | Interface literal | `@L<n>` | `invoice.created` (topic) → `@L2` |
 
 Restoration replaces only exact, known alias tokens. Anything that looks like an
 alias but is not in the map is flagged.
 
-- `internal` aliases repo-defined symbols only. Stdlib and third-party names stay
-  real, since they are public and help the model infer roles.
-- `all` also aliases parameter names and third-party symbols (most private, worst
-  output).
-- The map is stable across runs (seeded from symbol ids), stored at
-  `<out>/.archdoc/alias_map.json`, and gitignored.
+- `internal` aliases everything repo-defined: modules, classes, functions,
+  parameter and field names, enum members, module-level variables (type aliases)
+  and internal dotted paths in annotations. Stdlib, builtin and third-party names
+  stay real, because they are public and help the model infer roles.
+- `all` additionally aliases third-party symbols and unknown names in annotations
+  (most private, worst output).
+- Docstring aliasing is best effort: class names and distinctive function names are
+  rewritten, but arbitrary prose is not understood. That is why cloud docstrings
+  default to `none`.
+- Numbering is sequential, never a hash of the name. A hash of a guessable name
+  could be confirmed by the receiver.
+- The map is stable across runs, stored at `<out>/.archdoc/alias_map.json`, and
+  gitignored.
 
 ### 7.3 Role hints
 

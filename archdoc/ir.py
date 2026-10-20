@@ -87,6 +87,7 @@ class Module:
     imports: List[str] = field(default_factory=list)   # internal module ids or ext:...
     classes: List[Class] = field(default_factory=list)
     functions: List[Function] = field(default_factory=list)
+    variables: List[str] = field(default_factory=list)  # module-level assigned names (never values)
     has_main: bool = False             # contains `if __name__ == "__main__":`
     parse_error: Optional[str] = None
 

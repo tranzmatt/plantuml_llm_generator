@@ -43,3 +43,9 @@ def build_repo() -> ItemRepo:
     repo = CachedRepo(default_db)
     repo.get(1)
     return repo
+
+
+def connect(access_key: str = "AKIAQWERTYUIOPASDFGHJ"[:20], region: str = "us-east-1",
+            api_token: str = "AKIAQWERTYUIOPASDFGH") -> Database:
+    """Connect using CANARY_DOC_88aa credentials."""
+    return Database()

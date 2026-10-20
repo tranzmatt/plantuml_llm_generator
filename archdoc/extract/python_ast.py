@@ -300,6 +300,7 @@ def _parse_module(root: str, rel: str, module_id: str) -> ParsedModule:
             pm.var_values[node.target.id] = node.value
         elif isinstance(node, ast.If) and _is_main_guard(node):
             mod.has_main = True
+    mod.variables = sorted(pm.var_values)
     return pm
 
 

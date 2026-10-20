@@ -1,0 +1,540 @@
+"""
+Egress: the single function that turns the local IR into what an LLM (or an
+MCP client) is allowed to see.
+
+    build_payload(ir, config, tier, aliases) -> Payload
+
+The view is built field by field from an allowlist; nothing is copied from
+the IR wholesale, so a new IR field cannot leak by accident. Every string
+leaf passes through `_emit`, which applies secret scanning. References use
+real ids when the symbol's effective policy is `pseudonymize = off`, and
+aliases from the AliasMap otherwise.
+
+Payload JSON shape (keys kept short to save tokens):
+
+    {"repo", "tier", "level",
+     "modules": [{"ref", "doc"?, "imports", "main"?,
+                  "classes": [{"ref", "kind"?, "bases", "doc"?, "fields", "enum"?, "methods"}],
+                  "functions": [{"ref", "sig", "async"?, "doc"?, "decorators"?,
+                                 "calls"?, "creates"?, "raises"?}]}],
+     "interfaces": [{"ref", "kind", "dir", "owner", "protocol"?, "address"?, "name"?,
+                     "ops": [{"ref", "name"?, "params", "request"?, "response"?,
+                              "errors"?, "handler"?, "doc"?, "meta"?}]}]}
+"""
+
+from __future__ import annotations
+
+import builtins
+import datetime as _dt
+import hashlib
+import json
+import math
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from .interfaces import Interface, Operation, TypeRef
+from .ir import EXTERNAL_PREFIX, Class, Decorator, Field, Function, Module, RepoIR
+from .policy import Config, EgressPolicy, stricter
+from .pseudonym import AliasMap
+from .secrets_scan import redact
+from .trust import CLOUD
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+_WORD_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+_NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
+_QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
+
+# Names that are never repo-specific and stay readable even under pseudonymize=all.
+_SAFE_TYPE_NAMES = frozenset(dir(builtins)) | {
+    "Any", "Optional", "Union", "List", "Dict", "Set", "FrozenSet", "Tuple", "Type", "Callable",
+    "Iterable", "Iterator", "Generator", "AsyncIterator", "AsyncGenerator", "Awaitable", "Coroutine",
+    "Sequence", "Mapping", "MutableMapping", "Literal", "Annotated", "ClassVar", "Final", "Self",
+    "typing", "collections", "abc", "None", "NoneType",
+}
+_SAFE_DECORATORS = {
+    "property", "staticmethod", "classmethod", "dataclass", "dataclasses.dataclass",
+    "abstractmethod", "abc.abstractmethod", "cached_property", "functools.cached_property",
+    "functools.wraps", "functools.lru_cache", "lru_cache", "cache", "overload", "override",
+    "contextmanager", "asynccontextmanager", "contextlib.contextmanager", "typing.overload",
+}
+_KEEP_DUNDERS = {"__init__", "__call__"}
+_STRUCTURAL_CONSTRAINTS = {"in", "kind", "action"}     # values are vocabulary, not literals
+
+
+class EgressAborted(Exception):
+    """A secret was found and the effective policy says abort."""
+
+    def __init__(self, findings: List[Tuple[str, str]]):
+        self.findings = findings
+        where = "; ".join(f"{kind} in {path}" for path, kind in findings[:10])
+        super().__init__(f"egress aborted: {len(findings)} possible secret(s): {where}")
+
+
+@dataclass
+class Payload:
+    tier: str
+    artifact: str
+    data: Dict[str, Any]
+    text: str
+    redactions: List[Tuple[str, str]] = field(default_factory=list)   # (location, kind)
+
+    @property
+    def token_estimate(self) -> int:
+        return estimate_tokens(self.text)
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.text.encode()).hexdigest()
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough, tokenizer-free estimate (~4 chars/token for code-ish JSON)."""
+    return math.ceil(len(text) / 4)
+
+
+# ===========================================================================
+# Builder
+# ===========================================================================
+
+class _ViewBuilder:
+    def __init__(self, ir: RepoIR, config: Config, tier: str, aliases: AliasMap):
+        self.ir = ir
+        self.config = config
+        self.tier = tier
+        self.aliases = aliases
+        self.base = config.policy_for(tier)
+        cloud = config.policy_for(CLOUD)
+        self.mod_policy: Dict[str, EgressPolicy] = {
+            m.id: stricter(self.base, cloud) if config.is_sensitive(m.path) else self.base
+            for m in ir.modules
+        }
+        # True if anything at all is pseudonymized; then every annotation and
+        # docstring is rewritten, because a non-aliased module may mention a
+        # symbol owned by an aliased (e.g. sensitive) one.
+        self.any_aliased = self.base.pseudonymize != "off" or any(
+            p.pseudonymize != "off" for p in self.mod_policy.values())
+        self.module_ids = {m.id for m in ir.modules}
+        # first segment of internal dotted paths (pkg) and module basenames (connection)
+        self.module_heads = {m.id.split(".")[0] for m in ir.modules} | {m.id.rsplit(".", 1)[-1] for m in ir.modules}
+        self.internal_vars = {v for m in ir.modules for v in m.variables}
+        self.class_ids = {c.id for c in ir.iter_classes()}
+        self.class_by_name: Dict[str, List[str]] = {}
+        for c in ir.iter_classes():
+            self.class_by_name.setdefault(c.name, []).append(c.id)
+        self.func_by_name: Dict[str, str] = {}
+        for f in ir.iter_functions():
+            self.func_by_name.setdefault(f.name, f.id)
+        self.ext_roots: Dict[str, set] = {
+            m.id: {i[len(EXTERNAL_PREFIX):].split(".")[0] for i in m.imports if i.startswith(EXTERNAL_PREFIX)}
+            for m in ir.modules
+        }
+        self.redactions: List[Tuple[str, str]] = []
+        self.abort_findings: List[Tuple[str, str]] = []
+
+    # -- policy helpers -----------------------------------------------------
+
+    def pol(self, mid: Optional[str]) -> EgressPolicy:
+        return self.mod_policy.get(mid or "", self.base)
+
+    @staticmethod
+    def owner_module(symbol_id: str) -> str:
+        return symbol_id.split(":")[0]
+
+    def _emit(self, text: Optional[str], mid: Optional[str], where: str) -> Optional[str]:
+        """Final gate for every string leaf: secret scanning."""
+        if text is None or not self.config.secrets_scan:
+            return text
+        clean, findings = redact(text)
+        for f in findings:
+            if self.pol(mid).on_secret == "abort":
+                self.abort_findings.append((where, f.kind))
+            else:
+                self.redactions.append((where, f.kind))
+        return clean
+
+    # -- references ---------------------------------------------------------
+
+    def _aliased(self, mid: Optional[str]) -> bool:
+        return self.pol(mid).pseudonymize != "off"
+
+    def module_ref(self, mid: str) -> str:
+        return self.aliases.alias("module", mid) if self._aliased(mid) else mid
+
+    def symbol_ref(self, sid: str, ctx_mid: Optional[str] = None) -> str:
+        """Ref for a class id, function id, module id, ext:... or raw name."""
+        if sid.startswith(EXTERNAL_PREFIX):
+            if self.pol(ctx_mid).pseudonymize == "all":
+                return self.aliases.alias("literal", sid)
+            return sid
+        if ":" not in sid:
+            if sid in self.module_ids:
+                return self.module_ref(sid)
+            # unresolved name (e.g. a base like "str" or a module-level variable)
+            if self._aliased(ctx_mid) and sid not in _SAFE_TYPE_NAMES:
+                return self.aliases.alias("literal", sid)
+            return sid
+        mid = self.owner_module(sid)
+        if not self._aliased(mid):
+            return sid
+        kind = "class" if sid in self.class_ids else "function"
+        display = sid.split(":", 1)[1].rsplit(".", 1)[-1]
+        return self.aliases.alias(kind, sid, display)
+
+    def name(self, n: str, mid: Optional[str]) -> str:
+        return self.aliases.alias("name", n) if self._aliased(mid) else n
+
+    def literal(self, text: Optional[str], mid: Optional[str], where: str) -> Optional[str]:
+        if text is None:
+            return None
+        mode = self.pol(mid).interface_literals
+        if mode == "none":
+            return None
+        if mode == "alias":
+            return self.aliases.alias("literal", text)
+        return self._emit(text, mid, where)
+
+    def type_text(self, annotation: Optional[str], mid: Optional[str], type_id: Optional[str] = None,
+                  where: str = "") -> Optional[str]:
+        if annotation is None:
+            return None
+        if not self.any_aliased:
+            return self._emit(annotation, mid, where)
+
+        aliased_here = self._aliased(mid)
+
+        def sub(m: re.Match) -> str:
+            token = m.group()
+            if token.startswith("@"):
+                return token                        # already an alias (from a quoted literal)
+            head, last = token.split(".", 1)[0], token.rsplit(".", 1)[-1]
+            candidates = self.class_by_name.get(last)
+            if candidates:
+                cid = type_id if type_id in candidates else candidates[0]
+                return self.symbol_ref(cid, mid)
+            if aliased_here and head not in self.ext_roots.get(mid, ()):
+                internal_path = "." in token and (head in self.module_heads or last in self.internal_vars)
+                if internal_path or token in self.internal_vars or (
+                        self.pol(mid).pseudonymize == "all" and last not in _SAFE_TYPE_NAMES):
+                    return self.aliases.alias("literal", token)
+            return token
+
+        def quoted(m: re.Match) -> str:
+            content = m.group(1) if m.group(1) is not None else m.group(2)
+            if _IDENT_RE.fullmatch(content) and (content.rsplit(".", 1)[-1] in self.class_by_name
+                                                 or content in self.internal_vars):
+                return content                      # forward reference: rewritten by sub()
+            lit = self.literal(content, mid, where)  # a value, e.g. Literal['read']
+            if lit is None:
+                return "..."
+            return m.group(0) if lit == content else lit   # keep quotes on real literals
+
+        if aliased_here:
+            annotation = _QUOTED_RE.sub(quoted, annotation)
+        return self._emit(re.sub(r"@?" + _IDENT_RE.pattern, sub, annotation), mid, where)
+
+    def prose(self, text: Optional[str], mid: Optional[str], where: str) -> Optional[str]:
+        """Docstrings: trimmed per policy; internal class/function names aliased (best effort)."""
+        if not text:
+            return None
+        mode = self.pol(mid).docstrings
+        if mode == "none":
+            return None
+        if mode == "first_line":
+            text = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        if self.any_aliased:
+            def sub(m: re.Match) -> str:
+                w = m.group()
+                if w in self.class_by_name:
+                    return self.symbol_ref(self.class_by_name[w][0], mid)
+                if w in self.func_by_name and ("_" in w or len(w) > 6):
+                    return self.symbol_ref(self.func_by_name[w], mid)
+                return w
+            text = _WORD_RE.sub(sub, text)
+        return self._emit(text, mid, where) or None
+
+    def default_text(self, default: Optional[str], mid: Optional[str], where: str) -> Optional[str]:
+        """None when the parameter/field has no default or defaults are dropped."""
+        if default is None:
+            return None
+        mode = self.pol(mid).defaults
+        if mode == "none":
+            return None
+        if mode == "presence":
+            return "..."
+        if self.any_aliased and _IDENT_RE.fullmatch(default) and default not in _SAFE_TYPE_NAMES:
+            # a name such as Status.ACTIVE follows the same aliasing as types
+            return self.type_text(default, mid, where=where)
+        return self._emit(default, mid, where)
+
+    # -- members ------------------------------------------------------------
+
+    def _include_member(self, name: str, visibility: str, mid: str) -> bool:
+        if self.pol(mid).members == "all":
+            return True
+        if name.startswith("__") and name.endswith("__"):
+            return name in _KEEP_DUNDERS
+        return visibility == "public"
+
+    def field_view(self, f: Field, mid: str, where: str) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"name": self.name(f.name, mid)}
+        t = self.type_text(f.annotation, mid, f.type_id, where)
+        if t:
+            out["type"] = t
+        if f.required is not None:
+            out["req"] = f.required
+        d = self.default_text(f.default, mid, where)
+        if d is not None and not f.required:
+            out["default"] = d
+        cons = {}
+        for k, v in f.constraints.items():
+            if k in _STRUCTURAL_CONSTRAINTS or (v and (_NUMERIC_RE.match(v) or v in ("True", "False"))):
+                cons[k] = v
+            else:
+                lit = self.literal(v, mid, where)
+                if lit is not None:
+                    cons[k] = lit
+        if cons:
+            out["constraints"] = cons
+        doc = self.prose(f.docstring, mid, where)
+        if doc:
+            out["doc"] = doc
+        return out
+
+    def signature(self, fn: Function, mid: str, is_method: bool) -> str:
+        params = list(fn.params)
+        is_static = any(d.name in ("staticmethod",) for d in fn.decorators)
+        if is_method and not is_static and params and params[0].kind in ("positional", "positional_only"):
+            params = params[1:]
+        parts: List[str] = []
+        star_done = False
+        for i, p in enumerate(params):
+            if p.kind == "keyword_only" and not star_done:
+                parts.append("*")
+                star_done = True
+            prefix = "*" if p.kind == "var_positional" else "**" if p.kind == "var_keyword" else ""
+            if p.kind == "var_positional":
+                star_done = True
+            s = prefix + self.name(p.name, mid)
+            t = self.type_text(p.annotation, mid, where=fn.id)
+            if t:
+                s += f": {t}"
+            d = self.default_text(p.default, mid, fn.id)
+            if d is not None:
+                s += f" = {d}"
+            parts.append(s)
+            if p.kind == "positional_only" and (i + 1 == len(params) or params[i + 1].kind != "positional_only"):
+                parts.append("/")
+        sig = f"({', '.join(parts)})"
+        ret = self.type_text(fn.returns, mid, where=fn.id)
+        return f"{sig} -> {ret}" if ret else sig
+
+    def decorator_view(self, d: Decorator, mid: str) -> Optional[str]:
+        head = d.name.split(".")[0]
+        keep_name = (not self._aliased(mid) or d.name in _SAFE_DECORATORS
+                     or head in self.ext_roots.get(mid, ()))
+        name = d.name if keep_name else self.aliases.alias("literal", d.name)
+        if self.pol(mid).interface_literals == "real" and (d.args or d.kwargs):
+            args = [a for a in d.args] + [f"{k}={v}" for k, v in d.kwargs.items()]
+            # args can name classes (response_model=Item): same rewriting as annotations
+            return self.type_text(f"{name}({', '.join(args)})", mid, where=f"{mid}:decorator")
+        return name
+
+    def function_view(self, fn: Function, mid: str, is_method: bool) -> Dict[str, Any]:
+        pol = self.pol(mid)
+        out: Dict[str, Any] = {"ref": self.symbol_ref(fn.id, mid), "sig": self.signature(fn, mid, is_method)}
+        if fn.is_async:
+            out["async"] = True
+        doc = self.prose(fn.docstring, mid, fn.id)
+        if doc:
+            out["doc"] = doc
+        decos = [v for v in (self.decorator_view(d, mid) for d in fn.decorators) if v]
+        if decos:
+            out["decorators"] = decos
+        if pol.level_at_least("callgraph"):
+            for key, ids in (("calls", fn.calls), ("creates", fn.creates), ("raises", fn.raises)):
+                if ids:
+                    out[key] = [self.symbol_ref(i, mid) for i in ids]
+        return out
+
+    def class_view(self, c: Class, mid: str) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"ref": self.symbol_ref(c.id, mid)}
+        if c.kind != "class":
+            out["kind"] = c.kind
+        bases = [self.symbol_ref(b, mid) for b in c.bases]
+        if bases:
+            out["bases"] = bases
+        doc = self.prose(c.docstring, mid, c.id)
+        if doc:
+            out["doc"] = doc
+        fields_ = [self.field_view(f, mid, c.id) for f in c.fields
+                   if self._include_member(f.name, "protected" if f.name.startswith("_") else "public", mid)]
+        if fields_:
+            out["fields"] = fields_
+        if c.enum_members:
+            out["enum"] = [self.name(m, mid) for m in c.enum_members]
+        methods = [self.function_view(m, mid, True) for m in c.methods
+                   if self._include_member(m.name, m.visibility, mid)]
+        if methods:
+            out["methods"] = methods
+        return out
+
+    def module_view(self, m: Module) -> Dict[str, Any]:
+        mid = m.id
+        out: Dict[str, Any] = {"ref": self.module_ref(mid)}
+        doc = self.prose(m.docstring, mid, mid)
+        if doc:
+            out["doc"] = doc
+        imports = [self.symbol_ref(i, mid) for i in m.imports]
+        if imports:
+            out["imports"] = imports
+        if m.has_main:
+            out["main"] = True
+        classes = [self.class_view(c, mid) for c in m.classes
+                   if self._include_member(c.name, "protected" if c.name.startswith("_") else "public", mid)]
+        if classes:
+            out["classes"] = classes
+        funcs = [self.function_view(f, mid, False) for f in m.functions
+                 if self._include_member(f.name, f.visibility, mid)]
+        if funcs:
+            out["functions"] = funcs
+        return out
+
+    # -- interfaces ---------------------------------------------------------
+
+    def type_ref_view(self, t: Optional[TypeRef], mid: str, where: str) -> Optional[str]:
+        if t is None:
+            return None
+        return self.type_text(t.display, mid, t.type_id, where)
+
+    def op_view(self, iface: Interface, op: Operation, mid: str) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"ref": self._ref_for("op", op.id, op.name, mid)}
+        if iface.kind == "http" and " " in op.name:
+            method, path = op.name.split(" ", 1)
+            lit = self.literal(path, mid, op.id)
+            out["name"] = f"{method} {lit}" if lit else method
+        else:
+            lit = self.literal(op.name, mid, op.id)
+            if lit:
+                out["name"] = lit
+        params = [self.field_view(p, mid, op.id) for p in op.params]
+        if params:
+            out["params"] = params
+        for key, t in (("request", op.request), ("response", op.response)):
+            v = self.type_ref_view(t, mid, op.id)
+            if v:
+                out[key] = v
+        errors = [e if e.isdigit() else self.symbol_ref(e, mid) for e in op.errors]
+        if errors:
+            out["errors"] = errors
+        if op.handler:
+            out["handler"] = self.symbol_ref(op.handler, mid)
+        doc = self.prose(op.docstring, mid, op.id)
+        if doc:
+            out["doc"] = doc
+        meta = {}
+        for k, v in op.meta.items():
+            if k == "status_code":
+                meta[k] = v
+            elif k == "used_in":
+                meta[k] = [self.module_ref(x.strip()) for x in v.split(",") if x.strip()]
+            elif k == "default":
+                d = self.default_text(v, mid, op.id)
+                if d is not None:
+                    meta[k] = d
+            else:
+                lit = self.literal(v, mid, op.id)
+                if lit is not None:
+                    meta[k] = lit
+        if meta:
+            out["meta"] = meta
+        return out
+
+    def _ref_for(self, kind: str, key: str, display: str, mid: str) -> str:
+        return self.aliases.alias(kind, key, display) if self._aliased(mid) else key
+
+    def interface_view(self, iface: Interface) -> Dict[str, Any]:
+        mid = iface.owner if iface.owner in self.module_ids else None
+        out: Dict[str, Any] = {
+            "ref": self._ref_for("iface", iface.id, iface.name, mid),
+            "kind": iface.kind,
+            "dir": iface.direction,
+            "owner": self.module_ref(mid) if mid else self.repo_name(),
+        }
+        if iface.protocol:
+            out["protocol"] = iface.protocol
+        addr = self.literal(iface.address, mid, iface.id)
+        if addr:
+            out["address"] = addr
+        out["ops"] = [self.op_view(iface, op, mid) for op in iface.operations]
+        return out
+
+    def repo_name(self) -> str:
+        if self.base.pseudonymize == "off":
+            return self.ir.repo
+        return self.aliases.alias("literal", self.ir.repo)
+
+    # -- top level ----------------------------------------------------------
+
+    def build(self, modules: Optional[Iterable[str]]) -> Dict[str, Any]:
+        wanted = None if modules is None else set(modules)
+        mods = [m for m in self.ir.modules if wanted is None or m.id in wanted]
+        ifaces = [i for i in self.ir.interfaces if wanted is None or i.owner in wanted or i.kind == "env"]
+        view: Dict[str, Any] = {"repo": self.repo_name(), "tier": self.tier, "level": self.base.level}
+        if self.base.level == "none":
+            view["modules"], view["interfaces"] = [], []
+            return view
+        view["modules"] = [self.module_view(m) for m in mods if not m.parse_error]
+        view["interfaces"] = [self.interface_view(i) for i in ifaces]
+        return view
+
+
+def build_payload(
+    ir: RepoIR,
+    config: Config,
+    tier: str,
+    aliases: AliasMap,
+    artifact: str = "repo",
+    modules: Optional[Iterable[str]] = None,
+) -> Payload:
+    """Sanitized, optionally pseudonymized view of `ir` for `tier`.
+
+    Raises EgressAborted if a secret is found where policy says abort.
+    """
+    builder = _ViewBuilder(ir, config, tier, aliases)
+    data = builder.build(modules)
+    if builder.abort_findings:
+        raise EgressAborted(builder.abort_findings)
+    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    return Payload(tier=tier, artifact=artifact, data=data, text=text, redactions=builder.redactions)
+
+
+# ===========================================================================
+# Audit log
+# ===========================================================================
+
+class EgressLog:
+    """Append-only JSONL record of everything sent (<out>/.archdoc/egress.jsonl)."""
+
+    def __init__(self, path: str, include_payload: bool = True):
+        self.path = path
+        self.include_payload = include_payload
+
+    def record(self, payload: Payload, backend: str, url: Optional[str], **extra: Any) -> None:
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        entry = {
+            "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+            "backend": backend,
+            "url": url,
+            "tier": payload.tier,
+            "artifact": payload.artifact,
+            "sha256": payload.sha256,
+            "tokens_est": payload.token_estimate,
+            "redactions": len(payload.redactions),
+            **extra,
+        }
+        if self.include_payload:
+            entry["payload"] = payload.data
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
