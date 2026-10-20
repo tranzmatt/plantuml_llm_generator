@@ -51,12 +51,11 @@ def nested_groups(groups: List[Dict[str, Any]], n_messages: int) -> Tuple[List[D
 
 
 def render_sequence_diagram(ir: RepoIR, plan: Dict[str, Any], name: str, client_name: str = "Client",
-                            code_labels: bool = False, title: Optional[str] = None) -> Tuple[str, List[str]]:
-    """code_labels: label call messages with the called function's real name
-    instead of the model's wording. Use it when the model saw aliases: it
-    could not know what the names mean, so its wording is a guess."""
+                            title: Optional[str] = None) -> Tuple[str, List[str]]:
+    """`title` is used when the plan has none. An empty message label falls
+    back to the called function's name."""
     aliases = Aliases()
-    d = Diagram(name, title or plan.get("title") or None,
+    d = Diagram(name, plan.get("title") or title or None,
                 settings=["autonumber", "skinparam responseMessageBelowArrow true"])
     declared = set()
     implicit = [{"ref": r, "kind": "participant"}
@@ -82,7 +81,7 @@ def render_sequence_diagram(ir: RepoIR, plan: Dict[str, Any], name: str, client_
             d.add(f"{g['kind']} {_message_text(ir, {'label': g['label']}) or g['kind']}")
         src, dst = aliases(m["from"], "P"), aliases(m["to"], "P")
         arrow = "-->" if m.get("reply") else "->"
-        text = _message_text(ir, {**m, "label": ""} if code_labels and m.get("call") else m)
+        text = _message_text(ir, m)
         d.add(f"{src} {arrow} {dst}" + (f" : {text}" if text else ""))
         for _ in range(closes.get(i, 0)):
             d.add("end")

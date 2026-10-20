@@ -22,7 +22,7 @@ import jsonschema
 from ..backends import BackendError, LLMBackend
 from ..egress import EgressLog, Payload
 from ..ingress import accept
-from ..pseudonym import AliasMap
+from ..pseudonym import ALIAS_RE, AliasMap
 
 Validator = Callable[[Any], List[str]]
 
@@ -31,6 +31,8 @@ Validator = Callable[[Any], List[str]]
 class PlanResult:
     artifact: str
     plan: Optional[Any] = None          # restored (real ids), None on failure
+    raw: Optional[Any] = None           # the accepted answer as the model wrote it (aliases intact)
+    payload_aliased: bool = False       # the model saw pseudonymized identifiers
     errors: List[str] = field(default_factory=list)
     attempts: int = 0
     warnings: List[str] = field(default_factory=list)
@@ -62,7 +64,7 @@ def run_plan(
     repairs: int = 1,
     max_tokens: int = 2048,
 ) -> PlanResult:
-    result = PlanResult(payload.artifact)
+    result = PlanResult(payload.artifact, payload_aliased=bool(ALIAS_RE.search(payload.text)))
     base_user = instructions + payload.text
     user = base_user
     for attempt in range(1, repairs + 2):
@@ -102,7 +104,7 @@ def run_plan(
                        completion_tokens=getattr(completion, "completion_tokens", None),
                        seconds=getattr(completion, "seconds", None))
         if not errors:
-            result.plan, result.errors = restored, []
+            result.plan, result.raw, result.errors = restored, obj, []
             return result
         result.errors = errors
         user = (base_user + "\n\nYOUR PREVIOUS ANSWER:\n" + raw[:6000]

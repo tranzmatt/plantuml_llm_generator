@@ -3,9 +3,11 @@
 COMMON_RULES = """\
 - You see signatures and structure only, never implementation code.
 - Identifiers may be opaque references such as @C3, @F12 or @L4. Copy them
-  exactly as given; never invent, rename or expand them. Inside free text you
-  may mention a reference (e.g. "@F12 validates the order") and it will be
-  replaced with the real name.
+  exactly as given; never invent, rename or expand them.
+- When identifiers are opaque references, write free text in terms of them
+  (e.g. "@F12 loads @C3 from @C7"): each reference is replaced with the real
+  name afterwards. Do not guess what the system is about or invent domain
+  words; text that mentions no reference cannot be mapped back and is discarded.
 - Do not invent behavior, protocols, security mechanisms, performance figures
   or components that the input does not show.
 - Return only JSON matching the required schema."""
@@ -32,6 +34,7 @@ Produce a sequence diagram plan:
   order. A message for a call has "call" set to the called function's ref and a
   short label naming the action, and reply=false. For a third-party call, send
   the message to the caller itself (a self-call) with a label naming the library.
+  Build labels from the refs involved (e.g. "create @C2, then @F3").
   Use reply=true only for a few returns worth showing (e.g. the final response
   to client); a reply has call "".
   Keep it readable: at most about 15 messages; skip trivial helpers.

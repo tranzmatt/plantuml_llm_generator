@@ -655,11 +655,16 @@ Notes from implementation:
   groups need a raising function in the slice, and `loop` needs control-flow data
   (Phase 4). Unused participants are dropped. A 12B model reliably invents all
   three otherwise.
-- **Pseudonymized runs use code labels:** when the model saw aliases, call
-  messages are labelled with the real function name and titles come from the
-  entry point. Measured on the fixture: with names hidden, mistral-nemo invented
-  an "Order Processing Flow: Place Order → Check Inventory" for what is really
-  build_repo → get → get. The model still decides flow, order and kinds.
+- **Pseudonymized runs keep only reversible text.** The prompt asks the model to
+  write labels in terms of the references it was given ("Create @C2, then call
+  @F3"), which reverse mapping turns into real names ("Create CachedRepo, then
+  call get"). Sequence labels and titles with no reference in them were invented
+  by a model that never saw real names, so there is nothing to map back. They are
+  cleared (calls fall back to the function name, titles to the entry point) and
+  reported. Measured on the fixture: without this instruction, mistral-nemo wrote
+  "Place Order → Check Inventory" for build_repo → get → get. With it, nearly
+  every label referenced aliases and came back accurate ("Invoke cmd_serve",
+  "Create CachedRepo", "Call get").
 - **ICD narrative** fills only empty slots (code docstrings always win), is marked
   *(generated)*, closes the matching open items, and the banner states when
   the model only saw pseudonymized input. The prompt forbids claiming

@@ -10,7 +10,7 @@ from ..egress import EgressLog, build_interface_payload, build_sequence_payload
 from ..interfaces import Interface
 from ..ir import RepoIR
 from ..policy import Config
-from ..pseudonym import AliasMap
+from ..pseudonym import ALIAS_RE, AliasMap
 from . import prompts
 from .entries import Entry, call_slice
 from .planner import PlanResult, run_plan
@@ -73,6 +73,30 @@ def normalize_sequence(ir: RepoIR, plan: Any, slice_ids: List[str]) -> List[str]
     return warnings
 
 
+def keep_grounded_labels(result: PlanResult) -> List[str]:
+    """When the model saw aliases, keep only text it wrote *in terms of* those
+    aliases (restored to real names by ingress). Text with no alias in it was
+    invented: the model could not know what the code is about, so there is
+    nothing to map back. Cleared labels fall back to the called function's name.
+    """
+    if not result.payload_aliased:
+        return []
+    plan, raw = result.plan, result.raw
+    cleared = 0
+    for m, rm in zip(plan["messages"], raw["messages"]):
+        if m["label"] and not ALIAS_RE.search(rm["label"]):
+            m["label"] = ""
+            cleared += 1
+    for g, rg in zip(plan["groups"], raw["groups"]):
+        if g["label"] and not ALIAS_RE.search(rg["label"]):
+            g["label"] = ""
+            cleared += 1
+    if plan["title"] and not ALIAS_RE.search(raw["title"]):
+        plan["title"] = ""
+        cleared += 1
+    return [f"cleared {cleared} label(s) written without any reference (not reversible)"] if cleared else []
+
+
 def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
     ids = call_slice(ctx.ir, entry.handler, ctx.depth, ctx.max_nodes)
     payload = build_sequence_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, entry.handler, ids, entry.via)
@@ -80,6 +104,7 @@ def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
     result = run_plan(ctx.backend, payload, schema, prompts.SEQUENCE_SYSTEM, prompts.SEQUENCE_INSTRUCTIONS,
                       ctx.aliases, validate=check_sequence, log=ctx.log)
     if result.ok:
+        result.warnings += keep_grounded_labels(result)
         result.warnings += normalize_sequence(ctx.ir, result.plan, ids)
     return result
 
@@ -97,5 +122,6 @@ def plan_narrative(ctx: PlanContext, iface: Interface) -> PlanResult:
                     ctx.aliases, validate=check_narrative, log=ctx.log)
 
 
-__all__ = ["CLIENT", "PlanContext", "check_narrative", "check_sequence", "normalize_sequence",
+__all__ = ["CLIENT", "PlanContext", "check_narrative", "check_sequence", "keep_grounded_labels",
+           "normalize_sequence",
            "plan_narrative", "plan_sequence"]

@@ -178,10 +178,9 @@ def _sequence_files(ir, args, llm):
         slug = re.sub(r"[^A-Za-z0-9]+", "_", e.handler.split(":", 1)[1]).strip("_")
         stem = f"{ir.repo}_sequence_{slug}"
         client = "User" if e.via and e.via[0].kind == "cli" else "Client"
-        aliased = llm.config.policy_for(llm.tier).pseudonymize != "off"
         text, warnings = render_sequence_diagram(
-            ir, result.plan, stem, client_name=client, code_labels=aliased,
-            title=f"{e.via[0].name}: {e.via[1].name}" if aliased and e.via else (e.label if aliased else None))
+            ir, result.plan, stem, client_name=client,
+            title=f"{e.via[0].name}: {e.via[1].name}" if e.via else e.label)
         _save_plan(args, f"sequence_{slug}", result.plan)
         for w in result.warnings + warnings:
             print(f"  [WARN] {stem}: {w}")

@@ -201,11 +201,41 @@ def test_sequence_render(ir):
     assert text.count("\nend") == 2
 
 
-def test_sequence_code_labels_override_model_wording(ir):
-    text, _ = render_sequence_diagram(ir, PLAN, "seq", code_labels=True, title="router: GET /{item_id}")
-    assert "P_shop_api -> P_shop_repo_ItemRepo : get()" in text
-    assert "P_client -> P_shop_api : GET item" in text                       # no call: keeps label
+def test_sequence_title_fallback(ir):
+    text, _ = render_sequence_diagram(ir, {**PLAN, "title": ""}, "seq", title="router: GET /{item_id}")
     assert "title router: GET /{item_id}" in text
+    text, _ = render_sequence_diagram(ir, PLAN, "seq", title="ignored")
+    assert "title Read: item" in text
+
+
+def test_reverse_mapping_keeps_alias_labels_and_clears_invented_ones(ir):
+    def responder(system, user, schema):
+        plan = json.loads(sequence_responder(system, user, schema))
+        plan["title"] = "Order Processing Flow"                 # invented: no reference
+        plan["messages"][0]["label"] = "Place Order"            # invented, no call
+        return json.dumps(plan)                                 # other labels: "then @F.."
+
+    result = plan_sequence(_ctx(ir, "cloud", responder), _entry(ir, "shop.cli:cmd_serve"))
+    assert result.ok and result.payload_aliased
+    labels = [m["label"] for m in result.plan["messages"]]
+    assert labels[0] == "" and result.plan["title"] == ""
+    assert labels[1] == "then build_repo"                       # reverse-mapped, kept
+    assert labels[-1] == ""                                     # "response": no reference either
+    # title, "Place Order", "response" and the group's "not found"
+    assert any("cleared 4 label(s)" in w for w in result.warnings)
+    text, _ = render_sequence_diagram(ir, result.plan, "s", client_name="User", title="shopctl: serve")
+    assert "title shopctl: serve" in text and "Order" not in text
+    assert not re.search(r"@[MCFIOLp]\d+", text)
+
+
+def test_local_tier_keeps_all_labels(ir):
+    def responder(system, user, schema):
+        plan = json.loads(sequence_responder(system, user, schema))
+        plan["messages"][0]["label"] = "Place Order"
+        return json.dumps(plan)
+
+    result = plan_sequence(_ctx(ir, "local", responder), _entry(ir, "shop.cli:cmd_serve"))
+    assert not result.payload_aliased and result.plan["messages"][0]["label"] == "Place Order"
 
 
 def test_nested_groups():
@@ -316,7 +346,7 @@ def test_cli_all_with_llm(tmp_path, monkeypatch, capsys):
     assert (out / ".archdoc" / "alias_map.json").exists() and (out / ".archdoc" / "egress.jsonl").exists()
     assert len(os.listdir(out / ".archdoc" / "plans")) == 2
     seq = (out / "diagrams" / "sample_app_sequence_cmd_serve.puml").read_text()
-    assert "build_repo()" in seq and not re.search(r"@[MCFIOLp]\d+", seq)         # code labels, no aliases
+    assert "then build_repo" in seq and not re.search(r"@[MCFIOLp]\d+", seq)      # reverse-mapped labels
     assert "*(generated)*" in (out / "icd" / "sample_app_icd.md").read_text()
 
 
