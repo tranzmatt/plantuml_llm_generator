@@ -33,12 +33,25 @@ are pseudonymized before sending and restored afterwards. For repeat use, declar
 backends in `~/.config/archdoc/config.toml` and pass `--backend NAME`:
 
 ```toml
-[backends.laptop]
+[llm]
+prefer = ["spark-vllm", "laptop"]     # first reachable backend serving its model wins
+allow_cloud_fallback = false          # never move to a cloud model unless you say so
+
+[backends.spark-vllm]                 # vLLM: OpenAI-compatible, schema enforced
+url = "http://spark.example:9999/v1"
+model = "<id from /v1/models>"
+kind = "openai"
+trust = "local"
+
+[backends.laptop]                     # Ollama native API
 url = "http://localhost:11434"
 model = "mistral-nemo:12b"
 kind = "ollama"
 trust = "local"
 ```
+
+Hosts on VPN/CGNAT ranges (e.g. NetBird or Tailscale 100.x addresses) must be listed
+in `[trust] local_hosts` before they're accepted as local.
 
 Set `PLANTUML_JAR=/path/to/plantuml.jar` (or put `plantuml` on PATH) to
 syntax-check every generated diagram. Activity, state, use-case, deployment and

@@ -800,13 +800,56 @@ the source.
 
 ## 15. Backends
 
-`archdoc/backends/`:
+Two transports, both stdlib-only (`archdoc/backends/`), selected per backend by `kind`:
 
-- `openai_compat.py`, **primary**: `vllm serve`, Ollama `/v1`, llama.cpp,
-  LM Studio, and OpenAI-compatible cloud endpoints.
-- `anthropic.py`: optional, for direct Claude API use in batch mode.
-- `vllm_offline.py`: keeps the current in-process batched `LLM.generate()` for large
-  batch runs on the DGX (tier `local` by definition).
+| `kind` | Endpoint | Schema enforcement | Typical use |
+|--------|----------|--------------------|-------------|
+| `ollama` | native `/api/chat` | `format` (local models only; **not** enforced for Ollama cloud models) | laptops, the Spark's Ollama |
+| `openai` | `/chat/completions` | `response_format: json_schema` | vLLM (enforced), OpenAI-compatible servers, cloud APIs |
+
+The exact response format is also written into the prompt, because enforcement
+can't be assumed. Schema validation and ingress remain the real guards.
+
+### 15.1 Choosing a backend at run time
+
+Several backends can be configured, and the run uses whichever is available:
+
+```toml
+[llm]
+prefer = ["spark-vllm", "spark-ollama", "laptop"]   # tried in order
+allow_cloud_fallback = false                         # default
+
+[backends.spark-vllm]
+url = "http://spark-c432-host-203-52.netbird.cloud:9999/v1"
+model = "<id from /v1/models>"
+kind = "openai"
+trust = "local"
+```
+
+`--backend auto` (the default when `prefer` is set and an LLM artifact is requested),
+`--backend a,b` (an explicit list) or `--backend NAME`. Each candidate is checked in order:
+
+1. trust classification (a host that fails verification is skipped)
+2. **no silent move to cloud:** a cloud candidate is skipped unless
+   `allow_cloud_fallback = true` or it was named on its own
+3. health: reachable within 10 s **and serving the configured model**
+   (Ollama `/api/tags`, OpenAI-compatible `/models`)
+4. warm-up: Ollama loads the model once, with the run's `num_ctx` and `keep_alive`
+
+The first candidate that passes is used, and every skipped candidate is printed with
+its reason. During the run, the first connection failure or timeout trips a circuit
+breaker: remaining LLM requests are skipped and reported, and deterministic outputs
+are still written. Provenance records which backend and model produced each item,
+because results differ between models.
+
+Measured on the DGX Spark: two large-model servers sharing its unified memory (a
+120B model resident in vLLM while Ollama loads a 108B model) drove the host into
+thrashing, freezing even `sshd`. Run one large-model server at a time there.
+Ollama's first prompt after a load also paid a large one-time cost (19.8 s cold vs
+50 ms warm on an 8B model), which the warm-up absorbs.
+
+Planned: `vllm_offline` (in-process batched `LLM.generate()` for very large batch
+runs) and a direct Anthropic client.
 
 ## 16. CLI and package layout
 

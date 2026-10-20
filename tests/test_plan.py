@@ -479,7 +479,7 @@ def test_cli_skips_llm_when_backend_does_not_answer(tmp_path, monkeypatch, capsy
                    "--trust", "local", "--no-validate", "--no-date"])
     assert rc == 0
     printed = capsys.readouterr().out
-    assert "[SKIP] LLM outputs: backend not answering" in printed
+    assert "[SKIP] LLM outputs: no usable backend" in printed and "api/version: timed out" in printed
     assert os.listdir(out / "diagrams") == ["sample_app_class.puml"]   # deterministic output still written
     assert (out / "icd" / "sample_app_icd.md").exists()
 
@@ -499,3 +499,128 @@ def test_unreachable_server_is_unavailable():
     with pytest.raises(BackendError) as exc:
         b.health(timeout=2)
     assert exc.value.unavailable
+
+
+# -- choosing among several backends -------------------------------------------------
+
+def _selection_config(tmp_path, allow_cloud=False):
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(f"""
+[llm]
+prefer = ["spark-vllm", "spark-ollama", "laptop", "ollama-cloud"]
+allow_cloud_fallback = {str(allow_cloud).lower()}
+
+[backends.spark-vllm]
+url = "http://10.0.0.5:9999/v1"
+model = "nemotron"
+kind = "openai"
+trust = "local"
+
+[backends.spark-ollama]
+url = "http://10.0.0.5:11434"
+model = "gemma4:31b"
+kind = "ollama"
+trust = "local"
+
+[backends.laptop]
+url = "http://127.0.0.1:11434"
+model = "mistral-nemo:12b"
+kind = "ollama"
+trust = "local"
+
+[backends.ollama-cloud]
+url = "http://127.0.0.1:11434"
+model = "gpt-oss:120b-cloud"
+kind = "ollama"
+trust = "local"
+""")
+    return str(cfg)
+
+
+def _fleet(monkeypatch, healthy):
+    """make_backend double: only backends named in `healthy` answer their health check."""
+    made = []
+
+    class Fake(ScriptedBackend):
+        def health(self, timeout=10):
+            if self.name not in healthy:
+                raise BackendError(f"{self.name}: connection refused", unavailable=True)
+
+    def make(cfg):
+        b = Fake(sequence_responder, name=cfg.name, model=cfg.model, url=cfg.url)
+        made.append(cfg.name)
+        return b
+
+    monkeypatch.setattr(cli, "make_backend", make)
+    monkeypatch.setattr(cli, "ollama_remote_host", lambda url, model: None)
+    return made
+
+
+def _run(tmp_path, config, *extra):
+    return cli.main(["diagrams", FIXTURE, "-o", str(tmp_path / "out"), "--types", "sequence", "--max-entries", "1",
+                     "--no-validate", "--config", config, *extra])
+
+
+def test_prefer_list_uses_first_available(tmp_path, monkeypatch, capsys):
+    made = _fleet(monkeypatch, healthy={"laptop"})
+    _run(tmp_path, _selection_config(tmp_path))                  # no --backend: [llm] prefer applies
+    out = capsys.readouterr().out
+    assert "LLM: laptop (mistral-nemo:12b" in out
+    assert "(skipped spark-vllm: spark-vllm: connection refused)" in out
+    assert made == ["spark-vllm", "spark-ollama", "laptop"]       # stopped at the first that worked
+
+
+def test_prefer_list_never_falls_back_to_cloud_by_default(tmp_path, monkeypatch, capsys):
+    _fleet(monkeypatch, healthy={"ollama-cloud"})                # only the cloud model is up
+    _run(tmp_path, _selection_config(tmp_path))
+    out = capsys.readouterr().out
+    assert "[SKIP] LLM outputs: no usable backend" in out
+    assert "ollama-cloud: cloud, and [llm] allow_cloud_fallback is false" in out
+
+
+def test_cloud_fallback_when_allowed(tmp_path, monkeypatch, capsys):
+    _fleet(monkeypatch, healthy={"ollama-cloud"})
+    _run(tmp_path, _selection_config(tmp_path, allow_cloud=True))
+    assert "LLM: ollama-cloud (gpt-oss:120b-cloud" in capsys.readouterr().out
+
+
+def test_explicit_list_and_single_backend(tmp_path, monkeypatch, capsys):
+    cfg = _selection_config(tmp_path)
+    made = _fleet(monkeypatch, healthy={"spark-ollama", "ollama-cloud"})
+    _run(tmp_path, cfg, "--backend", "laptop,spark-ollama")
+    assert "LLM: spark-ollama" in capsys.readouterr().out and made == ["laptop", "spark-ollama"]
+    _run(tmp_path, cfg, "--backend", "ollama-cloud")             # named alone: cloud is a choice, not a fallback
+    assert "LLM: ollama-cloud" in capsys.readouterr().out
+
+
+def test_prefer_must_name_defined_backends(tmp_path):
+    from archdoc.policy import PolicyError, load_config
+    (tmp_path / ".archdoc.toml").write_text('[llm]\nprefer = ["nope"]\n')
+    with pytest.raises(PolicyError, match="undefined backend"):
+        load_config(str(tmp_path), user_config=None)
+
+
+def test_health_requires_the_model(http_server):
+    _Recorder.reply = {}
+
+    class Tags(_Recorder):
+        def do_GET(self):
+            data = json.dumps({"data": [{"id": "nvidia/nemotron"}]} if self.path.endswith("/models")
+                              else {"models": [{"name": "gemma4:31b"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = HTTPServer(("127.0.0.1", 0), Tags)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        OllamaBackend(Backend("o", url, "gemma4:31b", kind="ollama")).health()
+        with pytest.raises(BackendError, match="does not have model 'llama4:scout'"):
+            OllamaBackend(Backend("o", url, "llama4:scout", kind="ollama")).health()
+        OpenAICompatBackend(Backend("v", url + "/v1", "nvidia/nemotron")).health()
+        with pytest.raises(BackendError, match="serves nvidia/nemotron, not 'other'"):
+            OpenAICompatBackend(Backend("v", url + "/v1", "other")).health()
+    finally:
+        server.shutdown()

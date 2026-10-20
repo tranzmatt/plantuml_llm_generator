@@ -124,53 +124,88 @@ LLM_DIAGRAMS = PLANNED_DIAGRAMS + ("activity", "state", "usecase", "deployment",
 DEFAULT_URLS = {"ollama": "http://localhost:11434"}
 
 
-def _llm_context(args, cfg, ir):
-    """PlanContext for --backend / --model, or None when no LLM was requested."""
-    if getattr(args, "backend", None):
-        backend = cfg.backend(args.backend)
-    elif getattr(args, "model", None):
-        backend = Backend(
-            name="adhoc", url=args.url or DEFAULT_URLS.get(args.kind), model=args.model,
-            trust=args.trust, kind=args.kind, num_ctx=args.num_ctx,
-        )
-    else:
-        return None
+def _candidate_backends(args, cfg):
+    """(backends to try in order, whether the user named exactly one)."""
+    if getattr(args, "model", None):
+        return [Backend(name="adhoc", url=args.url or DEFAULT_URLS.get(args.kind), model=args.model,
+                        trust=args.trust, kind=args.kind, num_ctx=args.num_ctx)], True
+    requested = getattr(args, "backend", None)
+    if requested and requested != "auto":
+        names = [n.strip() for n in requested.split(",") if n.strip()]
+        return [cfg.backend(n) for n in names], len(names) == 1
+    if requested == "auto" and not cfg.llm_prefer:
+        raise PolicyError("--backend auto needs [llm] prefer = [...] in the config")
+    return [cfg.backends[n] for n in cfg.llm_prefer], False
+
+
+def _tier_of(backend, cfg, args):
     decision = classify(backend, cfg.local_hosts, cfg.cloud_model_patterns)
-    tier = decision.tier
+    tier, reasons = decision.tier, decision.reasons
     if backend.kind == "ollama" and tier != CLOUD and backend.url:
         remote = ollama_remote_host(backend.url, backend.model or "")
         if remote:
-            tier, decision.reasons = CLOUD, decision.reasons + [
-                f"overridden: Ollama reports this model runs at {remote}"]
-    if args.backend and args.trust == CLOUD:
-        tier, decision.reasons = CLOUD, decision.reasons + ["forced with --trust cloud"]
-    elif args.backend and args.trust and args.trust != tier:
+            tier, reasons = CLOUD, reasons + [f"overridden: Ollama reports this model runs at {remote}"]
+    if backend.name != "adhoc" and args.trust == CLOUD:
+        tier, reasons = CLOUD, reasons + ["forced with --trust cloud"]
+    elif backend.name != "adhoc" and args.trust and args.trust != tier:
         raise TrustError(f"backend {backend.name!r} classifies as {tier}; --trust can only make it stricter")
-    llm_backend = make_backend(backend)
-    print(f"  LLM: {backend.model} via {backend.kind} @ {backend.url or 'in-process'} "
-          f"(tier {tier}: {'; '.join(decision.reasons)})")
-    try:
-        llm_backend.health()
-    except BackendError as exc:
-        print(f"  [SKIP] LLM outputs: backend not answering ({exc}); writing the rest without it")
+    return tier, reasons
+
+
+def _llm_context(args, cfg, ir):
+    """PlanContext for the first usable backend, or None (LLM outputs are then skipped).
+
+    Candidates come from --model, --backend NAME[,NAME...] / auto, or [llm] prefer.
+    Each is trust-classified, health-checked (reachable and serving its model)
+    and warmed up; the first that passes is used. A search never lands on a
+    cloud backend unless [llm] allow_cloud_fallback = true or that backend was
+    named on its own.
+    """
+    candidates, explicit = _candidate_backends(args, cfg)
+    if not candidates:
         return None
-    t0 = time.monotonic()
-    try:
-        loaded = llm_backend.warm_up()
-    except BackendError as exc:
-        print(f"  [SKIP] LLM outputs: model failed to load within {backend.timeout}s ({exc})")
-        return None
-    if loaded is not None:
-        print(f"  model ready ({time.monotonic() - t0:.0f}s incl. load)")
-    state = _state_dir(args.output)
-    alias_path = os.path.join(state, "alias_map.json")
-    ctx = PlanContext(
-        ir=ir, config=cfg, tier=tier, aliases=AliasMap.load(alias_path),
-        backend=llm_backend,
-        log=EgressLog(os.path.join(state, "egress.jsonl")),
-        depth=args.depth, max_nodes=args.max_nodes, alias_path=alias_path,
-    )
-    return ctx
+    tried = []
+    for backend in candidates:
+        label = f"{backend.name} ({backend.model} via {backend.kind} @ {backend.url or 'in-process'})"
+        try:
+            tier, reasons = _tier_of(backend, cfg, args)
+        except TrustError as exc:
+            if explicit:
+                raise
+            tried.append(f"{backend.name}: {exc}")
+            continue
+        if tier == CLOUD and not explicit and not cfg.llm_allow_cloud_fallback:
+            tried.append(f"{backend.name}: cloud, and [llm] allow_cloud_fallback is false")
+            continue
+        llm_backend = make_backend(backend)
+        try:
+            llm_backend.health()
+        except BackendError as exc:
+            tried.append(f"{backend.name}: {exc}")
+            continue
+        print(f"  LLM: {label} (tier {tier}: {'; '.join(reasons)})")
+        t0 = time.monotonic()
+        try:
+            loaded = llm_backend.warm_up()
+        except BackendError as exc:
+            tried.append(f"{backend.name}: model failed to load within {backend.timeout}s ({exc})")
+            continue
+        if loaded is not None:
+            print(f"  model ready ({time.monotonic() - t0:.0f}s incl. load)")
+        for t in tried:
+            print(f"    (skipped {t})")
+        state = _state_dir(args.output)
+        alias_path = os.path.join(state, "alias_map.json")
+        return PlanContext(
+            ir=ir, config=cfg, tier=tier, aliases=AliasMap.load(alias_path),
+            backend=llm_backend,
+            log=EgressLog(os.path.join(state, "egress.jsonl")),
+            depth=args.depth, max_nodes=args.max_nodes, alias_path=alias_path,
+        )
+    print("  [SKIP] LLM outputs: no usable backend; writing the rest without it")
+    for t in tried:
+        print(f"    {t}")
+    return None
 
 
 def _save_plan(args, artifact: str, plan) -> None:
@@ -370,7 +405,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 def _add_llm_opts(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("LLM (optional; needed for sequence diagrams and ICD narrative)")
     who = g.add_mutually_exclusive_group()
-    who.add_argument("--backend", help="Backend name from config")
+    who.add_argument("--backend", help="Backend name from config, a comma-separated preference list, "
+                                         "or 'auto' for [llm] prefer (default when configured)")
     who.add_argument("--model", help="Ad-hoc backend model, e.g. mistral-nemo:12b")
     g.add_argument("--url", help="Ad-hoc backend URL (default for ollama: http://localhost:11434)")
     g.add_argument("--kind", choices=("ollama", "openai"), default="ollama", help="Ad-hoc backend API")

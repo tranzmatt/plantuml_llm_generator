@@ -94,7 +94,11 @@ class OllamaBackend(LLMBackend):
         self.keep_alive = cfg.keep_alive
 
     def health(self, timeout: int = 10) -> None:
-        _get(f"{self.url}/api/version", {}, timeout)
+        """Reachable, and serving this model (a server without it is not a candidate)."""
+        tags = _get(f"{self.url}/api/tags", {}, timeout)
+        names = {n for m in tags.get("models", []) for n in (m.get("name"), m.get("model")) if n}
+        if self.model not in names and f"{self.model}:latest" not in names:
+            raise BackendError(f"{self.url} does not have model {self.model!r}")
 
     def warm_up(self) -> Optional[float]:
         """An empty generate loads the model (and pays first-use GPU setup) once,
@@ -140,7 +144,11 @@ class OpenAICompatBackend(LLMBackend):
             self.headers["Authorization"] = f"Bearer {key}"
 
     def health(self, timeout: int = 10) -> None:
-        _get(f"{self.url}/models", self.headers, timeout)
+        """Reachable, and serving this model (vLLM serves exactly the ids in /models)."""
+        models = _get(f"{self.url}/models", self.headers, timeout)
+        ids = [m.get("id") for m in models.get("data", [])]
+        if ids and self.model not in ids:
+            raise BackendError(f"{self.url} serves {', '.join(map(str, ids))}, not {self.model!r}")
 
     def complete_json(self, system, user, schema, max_tokens=2048) -> Completion:
         body = {

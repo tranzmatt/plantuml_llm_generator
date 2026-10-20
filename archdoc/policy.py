@@ -89,6 +89,10 @@ class Config:
     local_hosts: List[str] = field(default_factory=list)
     cloud_model_patterns: List[str] = field(default_factory=lambda: list(DEFAULT_CLOUD_MODEL_PATTERNS))
     backends: Dict[str, Backend] = field(default_factory=dict)
+    # [llm] prefer: backends to try in order; the first reachable one serving its model is used
+    llm_prefer: List[str] = field(default_factory=list)
+    # whether that search may pick a cloud backend; never implied
+    llm_allow_cloud_fallback: bool = False
     sources: List[str] = field(default_factory=list)   # config files that were read
 
     def policy_for(self, tier: str) -> EgressPolicy:
@@ -128,7 +132,7 @@ def stricter(a: EgressPolicy, b: EgressPolicy) -> EgressPolicy:
 # Loading
 # ---------------------------------------------------------------------------
 
-_TOP_KEYS = {"policy", "paths", "secrets", "trust", "backends"}
+_TOP_KEYS = {"policy", "paths", "secrets", "trust", "backends", "llm"}
 
 
 def _read_toml(path: str) -> Dict[str, Any]:
@@ -198,4 +202,14 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
         if b.get("kind", "openai") not in ("openai", "ollama"):
             raise PolicyError(f"{src}: [backends.{name}] kind must be 'openai' or 'ollama'")
         cfg.backends[name] = Backend(name=name, **b)
+
+    llm = data.get("llm", {})
+    unknown = set(llm) - {"prefer", "allow_cloud_fallback"}
+    if unknown:
+        raise PolicyError(f"{src}: [llm] unknown key(s) {', '.join(sorted(unknown))}")
+    cfg.llm_prefer = list(llm.get("prefer", []))
+    missing = [n for n in cfg.llm_prefer if n not in cfg.backends]
+    if missing:
+        raise PolicyError(f"{src}: [llm] prefer names undefined backend(s): {', '.join(missing)}")
+    cfg.llm_allow_cloud_fallback = bool(llm.get("allow_cloud_fallback", False))
     return cfg
