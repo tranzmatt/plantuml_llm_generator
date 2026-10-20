@@ -89,15 +89,19 @@ def verify_sequence(ir: RepoIR, plan: Dict[str, Any], slice_ids: List[str], entr
             issues.append(Issue("message", i, f"{src} -> {dst} is not a call, a return, or a "
                                               f"third-party call in the code"))
 
+    # A raise is evidence of a conditional path in the function that raises. Inside a
+    # group, that function is either called (a call to it) or already running (a
+    # message sent by its owner, e.g. read_item raising HTTPException as a self-call).
     raising = {f for f, fn in fns.items() if fn.raises}
+    raising_owners = {participant_of(f) for f in raising}
     for gi, g in enumerate(plan.get("groups", [])):
         if g["kind"] == "loop":
             issues.append(Issue("group", gi, "loops need control-flow data, which this request did not include"))
         elif g["kind"] in ("alt", "opt"):
             inside = messages[g["first"]:g["last"] + 1]
-            if not any((m.get("call") or "") in raising for m in inside):
-                issues.append(Issue("group", gi, f"{g['kind']} {g['label']!r} contains no call to a function "
-                                                 f"that raises, so the code shows no condition here"))
+            if not any((m.get("call") or "") in raising or m["from"] in raising_owners for m in inside):
+                issues.append(Issue("group", gi, f"{g['kind']} {g['label']!r} involves no function that raises, "
+                                                 f"so the code shows no condition here"))
     return issues
 
 

@@ -136,11 +136,11 @@ def test_third_party_self_call_allowed_only_for_real_callers(ir):
 def test_groups_need_evidence(ir, slice_ids):
     p = plan_with(groups=[
         {"kind": "alt", "label": "missing", "first": 1, "last": 1},     # ItemRepo.get raises KeyError
-        {"kind": "alt", "label": "invented", "first": 2, "last": 2},    # Database.query raises nothing
+        {"kind": "alt", "label": "invented", "first": 3, "last": 3},    # Database's reply: nothing there raises
         {"kind": "loop", "label": "retry", "first": 1, "last": 2},
     ])
     issues = texts(verify_sequence(ir, p, slice_ids, ENTRY))
-    assert any(t.startswith("groups[1]:") and "no call to a function that raises" in t for t in issues)
+    assert any(t.startswith("groups[1]:") and "involves no function that raises" in t for t in issues)
     assert any(t.startswith("groups[2]:") and "loops need control-flow data" in t for t in issues)
     assert not any(t.startswith("groups[0]:") for t in issues)
 
@@ -223,3 +223,21 @@ def test_cloud_repair_prompt_uses_aliases_only(ir):
               if re.search(rf"(?<![A-Za-z0-9_]){re.escape(w)}(?![A-Za-z0-9_])", feedback)]
     assert leaked == []                                                    # ...in alias terms only
     payload_of(repair)                                                     # payload still parseable
+
+
+def test_alt_around_the_raising_function_itself(ir, slice_ids):
+    """Mistral Medium 3.5's read_item plan: the entry function raises HTTPException,
+    drawn as a third-party self-call. A correct branch must not be removed."""
+    p = plan_with()
+    p["messages"].insert(4, msg("shop.api", "shop.api", label="ext:fastapi.HTTPException"))
+    p["groups"] = [{"kind": "alt", "label": "item not found", "first": 4, "last": 4}]
+    assert verify_sequence(ir, p, slice_ids, ENTRY) == []
+
+
+def test_alt_with_no_raising_function_still_rejected(ir):
+    ids = call_slice(ir, "shop.cli:main")            # main -> ping -> query: nothing raises
+    p = {"title": "", "participants": [], "messages": [
+        msg("client", "shop.cli", "shop.cli:main"), msg("shop.cli", "shop.repo", "shop.repo:ping")],
+        "groups": [{"kind": "alt", "label": "ping failed", "first": 1, "last": 1}]}
+    assert texts(verify_sequence(ir, p, ids, "shop.cli:main")) == [
+        "groups[0]: alt 'ping failed' involves no function that raises, so the code shows no condition here"]

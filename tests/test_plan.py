@@ -624,3 +624,10 @@ def test_health_requires_the_model(http_server):
             OpenAICompatBackend(Backend("v", url + "/v1", "other")).health()
     finally:
         server.shutdown()
+
+
+def test_ids_in_labels_render_as_short_names(ir):
+    plan = json.loads(json.dumps(PLAN))
+    plan["messages"][1]["label"] = "call @shop.repo:ItemRepo.get for shop.models:Item"
+    text, _ = render_sequence_diagram(ir, plan, "s")
+    assert "P_shop_api -> P_shop_repo_ItemRepo : call ItemRepo.get for Item" in text

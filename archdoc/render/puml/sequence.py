@@ -9,6 +9,7 @@ nesting), and reported back as warnings.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...ir import RepoIR
@@ -26,8 +27,30 @@ def participant_name(ir: RepoIR, ref: str, client_name: str) -> str:
     return ref                                       # module id
 
 
+def _short_names(ir: RepoIR) -> Dict[str, str]:
+    """IR id -> the name a reader expects in a label (ItemRepo.get, build_repo, shop.repo)."""
+    out = {m.id: m.id for m in ir.modules}
+    for c in ir.iter_classes():
+        out[c.id] = c.name
+    for f in ir.iter_functions():
+        qual = f.id.split(":", 1)[1]
+        out[f.id] = qual if "." in qual else f.name
+    return out
+
+
+def _readable(ir: RepoIR, text: str) -> str:
+    """Full ids written into a label (sometimes with a stray '@') become short names."""
+    names = getattr(ir, "_short_names_cache", None)
+    if names is None:
+        names = _short_names(ir)
+        ir._short_names_cache = names
+    def sub(m: re.Match) -> str:
+        return names.get(m.group(1), m.group(0))
+    return re.sub(r"@?([A-Za-z_][\w.]*:[\w.]+)", sub, text)
+
+
 def _message_text(ir: RepoIR, msg: Dict[str, Any]) -> str:
-    text = (msg.get("label") or "").strip()
+    text = _readable(ir, (msg.get("label") or "").strip())
     if not text and msg.get("call"):
         fn = ir.find_function(msg["call"])
         text = f"{fn.name}()" if fn else msg["call"].rsplit(".", 1)[-1]
