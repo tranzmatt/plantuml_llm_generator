@@ -389,3 +389,52 @@ def test_live_ollama(ir, tier):
     router = next(i for i in ir.interfaces if i.id == "if:http:shop.api:router")
     nar = plan_narrative(ctx, router)
     assert nar.ok, nar.errors
+
+
+# -- servers that do not enforce the schema ------------------------------------------
+
+def test_response_format_is_in_the_prompt(ir):
+    ctx = _ctx(ir, "cloud", sequence_responder)
+    plan_sequence(ctx, _entry(ir, "shop.cli:cmd_serve"))
+    system = ctx.backend.calls[0]["system"]
+    assert "RESPONSE FORMAT" in system and '"kind": "participant" | "actor"' in system
+    assert '<a ref exactly as it appears in the input, or "client">' in system
+    fmt = system.split("RESPONSE FORMAT", 1)[1]
+    assert "@C" not in fmt and "@F" not in fmt                 # ref lists stay out of the format
+
+
+def test_schema_errors_name_the_allowed_keys(ir):
+    def wrong_keys(system, user, schema):                     # what gpt-oss did before the format was shown
+        plan = json.loads(sequence_responder(system, user, schema))
+        for p in plan["participants"]:
+            p["type"] = p.pop("kind")
+        return json.dumps(plan)
+
+    backend = ScriptedBackend(wrong_keys)
+    ctx = PlanContext(ir=ir, config=Config(), tier="cloud", aliases=AliasMap(), backend=backend)
+    plan_sequence(ctx, _entry(ir, "shop.cli:cmd_serve"))
+    assert "(allowed keys: ref, kind)" in backend.calls[1]["user"]
+
+
+def test_ollama_remote_host_detection(http_server, monkeypatch):
+    from archdoc.backends import ollama_remote_host
+
+    class Tags(_Recorder):
+        def do_GET(self):
+            data = json.dumps({"models": [
+                {"name": "big:cloud-ish", "model": "big:cloud-ish", "remote_host": "https://ollama.com"},
+                {"name": "mistral-nemo:12b", "model": "mistral-nemo:12b"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = HTTPServer(("127.0.0.1", 0), Tags)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        assert ollama_remote_host(url, "big:cloud-ish") == "https://ollama.com"   # name matches no pattern
+        assert ollama_remote_host(url, "mistral-nemo:12b") is None
+        assert ollama_remote_host("http://127.0.0.1:1", "x") is None             # unreachable: no opinion
+    finally:
+        server.shutdown()

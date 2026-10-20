@@ -20,9 +20,42 @@ def _obj(props: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "object", "additionalProperties": False, "required": list(props), "properties": props}
 
 
-def _ref(values: List[str], allow_empty: bool = False) -> Dict[str, Any]:
+REF_DESCRIPTION = "a ref exactly as it appears in the input"
+
+
+def _ref(values: List[str], allow_empty: bool = False, also: str = "") -> Dict[str, Any]:
     vals = list(dict.fromkeys(values + ([""] if allow_empty else [])))
-    return {"type": "string", "enum": vals} if vals else {"type": "string", "maxLength": 0}
+    desc = REF_DESCRIPTION + (f', or "{also}"' if also else "") + (', or ""' if allow_empty else "")
+    if not vals:
+        return {"type": "string", "maxLength": 0, "description": '""'}
+    return {"type": "string", "enum": vals, "description": desc}
+
+
+def outline(schema: Dict[str, Any], indent: int = 0) -> str:
+    """Human-readable response format for the prompt.
+
+    Servers that do not enforce `format`/`response_format` (Ollama cloud models,
+    some OpenAI-compatible servers) only know the shape from the prompt. Ref
+    enums are described, not listed: the refs are already in the input.
+    """
+    pad = "  " * indent
+    t = schema.get("type")
+    if t == "object":
+        lines = ["{"]
+        for k, sub in schema["properties"].items():
+            lines.append(f'{pad}  "{k}": {outline(sub, indent + 1)},')
+        lines[-1] = lines[-1].rstrip(",")
+        return "\n".join(lines + [pad + "}"])
+    if t == "array":
+        note = " (must be empty)" if schema.get("maxItems") == 0 else ""
+        return f"[ {outline(schema['items'], indent)} ]{note}"
+    if "enum" in schema:
+        if schema.get("description", "").startswith(REF_DESCRIPTION):
+            return f"<{schema['description']}>"
+        return " | ".join(f'"{v}"' for v in schema["enum"])
+    if "description" in schema:
+        return f"<{schema['description']}>"
+    return {"string": "<string>", "integer": "<integer>", "boolean": "true | false"}.get(t, "<value>")
 
 
 def sequence_schema(participants: List[str], functions: List[str]) -> Dict[str, Any]:
@@ -30,12 +63,12 @@ def sequence_schema(participants: List[str], functions: List[str]) -> Dict[str, 
     return _obj({
         "title": {"type": "string"},
         "participants": {"type": "array", "minItems": 1, "items": _obj({
-            "ref": _ref(parts),
+            "ref": _ref(parts, also=CLIENT),
             "kind": {"type": "string", "enum": PARTICIPANT_KINDS},
         })},
         "messages": {"type": "array", "minItems": 1, "items": _obj({
-            "from": _ref(parts),
-            "to": _ref(parts),
+            "from": _ref(parts, also=CLIENT),
+            "to": _ref(parts, also=CLIENT),
             "call": _ref(functions, allow_empty=True),
             "label": {"type": "string"},
             "reply": {"type": "boolean"},

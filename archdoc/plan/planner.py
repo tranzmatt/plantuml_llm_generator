@@ -24,6 +24,7 @@ from ..backends import BackendError, LLMBackend
 from ..egress import EgressLog, Payload
 from ..ingress import accept
 from ..pseudonym import ALIAS_RE, AliasMap
+from .schemas import REF_DESCRIPTION, outline
 
 Validator = Callable[[Any], List[str]]
 
@@ -54,7 +55,12 @@ def _schema_errors(obj: Any, schema: Dict[str, Any], limit: int = 8) -> List[str
     out = []
     for e in errs[:limit]:
         where = "$" + "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in e.path)
-        out.append(f"{where}: {e.message[:200]}")
+        msg = e.message[:200]
+        if e.validator == "additionalProperties":
+            msg += f" (allowed keys: {', '.join(e.schema.get('properties', {}))})"
+        elif e.validator == "enum" and str(e.schema.get("description", "")).startswith(REF_DESCRIPTION):
+            msg = f"{e.instance!r} is not a ref from the input"
+        out.append(f"{where}: {msg}")
     return out
 
 
@@ -91,6 +97,8 @@ def run_plan(
 ) -> PlanResult:
     result = PlanResult(payload.artifact, payload_aliased=bool(ALIAS_RE.search(payload.text)))
     to_payload_terms = payload_terms(payload, aliases)
+    system = system + "\n\nRESPONSE FORMAT: one JSON object with exactly these keys, all required:\n" \
+        + outline(schema)
     base_user = instructions + payload.text
     user = base_user
     for attempt in range(1, repairs + 2):

@@ -11,7 +11,7 @@ from collections import Counter
 import re
 import time
 
-from .backends import make_backend
+from .backends import make_backend, ollama_remote_host
 from .egress import EgressAborted, EgressLog, build_payload, estimate_tokens
 from .extract import extract_python
 from .extract.python_ast import collect_python_files
@@ -136,6 +136,11 @@ def _llm_context(args, cfg, ir):
         return None
     decision = classify(backend, cfg.local_hosts, cfg.cloud_model_patterns)
     tier = decision.tier
+    if backend.kind == "ollama" and tier != CLOUD and backend.url:
+        remote = ollama_remote_host(backend.url, backend.model or "")
+        if remote:
+            tier, decision.reasons = CLOUD, decision.reasons + [
+                f"overridden: Ollama reports this model runs at {remote}"]
     if args.backend and args.trust == CLOUD:
         tier, decision.reasons = CLOUD, decision.reasons + ["forced with --trust cloud"]
     elif args.backend and args.trust and args.trust != tier:

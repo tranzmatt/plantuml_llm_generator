@@ -132,6 +132,21 @@ class ScriptedBackend(LLMBackend):
         return Completion(self.respond(system, user, schema))
 
 
+def ollama_remote_host(url: str, model: str, timeout: int = 10) -> Optional[str]:
+    """Where Ollama says `model` actually runs: e.g. "https://ollama.com" for cloud
+    models proxied through the local daemon, None for a local model or if the
+    daemon cannot be asked. A stronger signal than the model-name patterns."""
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/api/tags", timeout=timeout) as resp:
+            models = json.loads(resp.read()).get("models", [])
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    for m in models:
+        if model in (m.get("name"), m.get("model")):
+            return m.get("remote_host") or None
+    return None
+
+
 def make_backend(cfg: Backend, temperature: float = 0.0) -> LLMBackend:
     if cfg.kind == "ollama":
         return OllamaBackend(cfg, temperature)
