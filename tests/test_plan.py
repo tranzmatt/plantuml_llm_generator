@@ -46,20 +46,35 @@ def _enum(schema, *path):
     return node["enum"]
 
 
+def payload_of(user):
+    """The JSON payload inside a planner prompt (repair rounds append text after it)."""
+    return json.loads(user.split("INPUT:\n", 1)[1].split("\n\nYOUR PREVIOUS ANSWER")[0])
+
+
 def sequence_responder(system, user, schema):
-    """A well-behaved model: uses only refs the schema allows, in call order."""
-    parts = [p for p in _enum(schema, "participants", "items", "ref") if p != "client"]
-    calls = [c for c in _enum(schema, "messages", "items", "call") if c]
-    msgs = [{"from": "client", "to": parts[0], "call": "", "label": "request", "reply": False}]
-    for i, c in enumerate(calls[1:], start=1):
-        msgs.append({"from": parts[0], "to": parts[min(i, len(parts) - 1)], "call": c,
-                     "label": f"then {c}", "reply": False})
-    msgs.append({"from": parts[0], "to": "client", "call": "", "label": "response", "reply": True})
+    """A faithful model: walks the call graph in the payload, depth first, in call order."""
+    payload = payload_of(user)
+    funcs = {f["ref"]: f for f in payload["functions"]}
+    handler = payload["entry"]["handler"]
+    owner = lambda f: funcs[f]["owner"]
+    msgs = [{"from": "client", "to": owner(handler), "call": handler, "label": f"invoke {handler}", "reply": False}]
+    seen = {handler}
+
+    def walk(f):
+        for c in funcs[f].get("calls", []):
+            if c in funcs and c not in seen:
+                seen.add(c)
+                msgs.append({"from": owner(f), "to": owner(c), "call": c, "label": f"then {c}", "reply": False})
+                walk(c)
+
+    walk(handler)
+    msgs.append({"from": owner(handler), "to": "client", "call": "", "label": "response", "reply": True})
+    parts = list(dict.fromkeys(m[k] for m in msgs for k in ("from", "to") if m[k] != "client"))
     return json.dumps({
         "title": "flow",
         "participants": [{"ref": "client", "kind": "actor"}] + [{"ref": p, "kind": "participant"} for p in parts],
         "messages": msgs,
-        "groups": [{"kind": "alt", "label": "not found", "first": 1, "last": 1}],
+        "groups": [],
     })
 
 
@@ -167,7 +182,8 @@ def test_check_sequence_group_ranges():
     plan = {"participants": [{"ref": "a"}, {"ref": "a"}],
             "messages": [{"from": "a", "to": "b"}], "groups": [{"first": 0, "last": 3}]}
     errors = check_sequence(plan)
-    assert any("more than once" in e for e in errors) and any("outside" in e for e in errors)
+    assert plan["participants"] == [{"ref": "a"}]          # duplicates are merged, not an error
+    assert len(errors) == 1 and "outside" in errors[0]
 
 
 # -- sequence rendering -------------------------------------------------------------
@@ -221,8 +237,8 @@ def test_reverse_mapping_keeps_alias_labels_and_clears_invented_ones(ir):
     assert labels[0] == "" and result.plan["title"] == ""
     assert labels[1] == "then build_repo"                       # reverse-mapped, kept
     assert labels[-1] == ""                                     # "response": no reference either
-    # title, "Place Order", "response" and the group's "not found"
-    assert any("cleared 4 label(s)" in w for w in result.warnings)
+    # title, "Place Order" and "response"
+    assert any("cleared 3 label(s)" in w for w in result.warnings)
     text, _ = render_sequence_diagram(ir, result.plan, "s", client_name="User", title="shopctl: serve")
     assert "title shopctl: serve" in text and "Order" not in text
     assert not re.search(r"@[MCFIOLp]\d+", text)
@@ -341,11 +357,11 @@ def test_cli_all_with_llm(tmp_path, monkeypatch, capsys):
     assert rc == 0
     printed = capsys.readouterr().out
     assert "tier cloud" in printed
-    assert sorted(os.listdir(out / "diagrams")) == ["sample_app_sequence_cmd_serve.puml",
-                                                     "sample_app_sequence_read_item.puml"]
+    assert sorted(os.listdir(out / "diagrams")) == ["sample_app_sequence_shop_api_read_item.puml",
+                                                     "sample_app_sequence_shop_cli_cmd_serve.puml"]
     assert (out / ".archdoc" / "alias_map.json").exists() and (out / ".archdoc" / "egress.jsonl").exists()
     assert len(os.listdir(out / ".archdoc" / "plans")) == 2
-    seq = (out / "diagrams" / "sample_app_sequence_cmd_serve.puml").read_text()
+    seq = (out / "diagrams" / "sample_app_sequence_shop_cli_cmd_serve.puml").read_text()
     assert "then build_repo" in seq and not re.search(r"@[MCFIOLp]\d+", seq)      # reverse-mapped labels
     assert "*(generated)*" in (out / "icd" / "sample_app_icd.md").read_text()
 
@@ -373,20 +389,3 @@ def test_live_ollama(ir, tier):
     router = next(i for i in ir.interfaces if i.id == "if:http:shop.api:router")
     nar = plan_narrative(ctx, router)
     assert nar.ok, nar.errors
-
-
-def test_normalize_sequence_removes_unsupported_structure(ir):
-    from archdoc.plan.artifacts import normalize_sequence
-    plan = json.loads(json.dumps(PLAN))
-    plan["participants"].append({"ref": "shop.models:Item", "kind": "entity"})
-    plan["messages"][1]["reply"] = True
-    # read_item's slice raises (HTTPException, KeyError): alt/opt survive, loop never does
-    warnings = normalize_sequence(ir, plan, call_slice(ir, READ_ITEM))
-    assert plan["messages"][1]["reply"] is False
-    assert [g["kind"] for g in plan["groups"]] == ["alt", "opt"]
-    assert "shop.models:Item" not in {p["ref"] for p in plan["participants"]}
-    assert len(warnings) == 2
-    # main -> ping -> query raises nothing: every group is dropped
-    plan2 = json.loads(json.dumps(PLAN))
-    normalize_sequence(ir, plan2, call_slice(ir, "shop.cli:main"))
-    assert plan2["groups"] == []

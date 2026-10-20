@@ -175,7 +175,8 @@ def _sequence_files(ir, args, llm):
             print(f"  [FAIL] sequence for {e.label}: {'; '.join(result.errors[:3])} "
                   f"({result.attempts} attempt(s), {took:.0f}s)")
             continue
-        slug = re.sub(r"[^A-Za-z0-9]+", "_", e.handler.split(":", 1)[1]).strip("_")
+        # module + function: different modules often both have a `main`
+        slug = re.sub(r"[^A-Za-z0-9]+", "_", e.handler).strip("_")
         stem = f"{ir.repo}_sequence_{slug}"
         client = "User" if e.via and e.via[0].kind == "cli" else "Client"
         text, warnings = render_sequence_diagram(

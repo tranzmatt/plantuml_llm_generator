@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -32,6 +33,11 @@ class PlanResult:
     artifact: str
     plan: Optional[Any] = None          # restored (real ids), None on failure
     raw: Optional[Any] = None           # the accepted answer as the model wrote it (aliases intact)
+    # last answer that parsed, matched the schema and passed ingress but failed
+    # `validate`: artifacts may prune it instead of discarding the whole plan
+    candidate: Optional[Any] = None
+    candidate_raw: Optional[Any] = None
+    report: Dict[str, Any] = field(default_factory=dict)   # artifact-specific facts for provenance
     payload_aliased: bool = False       # the model saw pseudonymized identifiers
     errors: List[str] = field(default_factory=list)
     attempts: int = 0
@@ -52,6 +58,25 @@ def _schema_errors(obj: Any, schema: Dict[str, Any], limit: int = 8) -> List[str
     return out
 
 
+def payload_terms(payload: Payload, aliases: AliasMap) -> Callable[[str], str]:
+    """Rewrite text in the terms the model was shown.
+
+    Validators report problems after ingress, i.e. with real ids. Before such a
+    message goes back to the model in a repair prompt, every real term that this
+    payload showed as an alias is replaced by that alias, so a repair round
+    never discloses a name the payload hid. Terms the payload showed for real
+    (local tier) are left alone.
+    """
+    present = sorted(set(ALIAS_RE.findall(payload.text)))
+    pairs = [(aliases.resolve_ref(a), a) for a in present]
+    pairs = sorted(((k, a) for k, a in pairs if k), key=lambda kv: -len(kv[0]))
+    if not pairs:
+        return lambda text: text
+    rx = re.compile("|".join(rf"(?<![\w.:/-]){re.escape(k)}(?![\w/-])" for k, _ in pairs))
+    lookup = dict(pairs)
+    return lambda text: rx.sub(lambda m: lookup[m.group(0)], text)
+
+
 def run_plan(
     backend: LLMBackend,
     payload: Payload,
@@ -65,6 +90,7 @@ def run_plan(
     max_tokens: int = 2048,
 ) -> PlanResult:
     result = PlanResult(payload.artifact, payload_aliased=bool(ALIAS_RE.search(payload.text)))
+    to_payload_terms = payload_terms(payload, aliases)
     base_user = instructions + payload.text
     user = base_user
     for attempt in range(1, repairs + 2):
@@ -94,6 +120,8 @@ def run_plan(
             restored = ingress.data
         if restored is not None and not errors and validate:
             errors = validate(restored)
+            if errors:
+                result.candidate, result.candidate_raw = restored, obj
 
         if log:
             log.record(payload, backend.name, backend.url, model=backend.model, attempt=attempt,
@@ -108,6 +136,7 @@ def run_plan(
             return result
         result.errors = errors
         user = (base_user + "\n\nYOUR PREVIOUS ANSWER:\n" + raw[:6000]
-                + "\n\nIT WAS REJECTED FOR THESE REASONS:\n" + "\n".join(f"- {e}" for e in errors)
+                + "\n\nIT WAS REJECTED FOR THESE REASONS:\n"
+                + "\n".join(f"- {to_payload_terms(e)}" for e in errors)
                 + "\n\nReturn a corrected JSON answer.")
     return result
