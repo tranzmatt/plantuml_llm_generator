@@ -1,32 +1,161 @@
 # Design: Interface-Only Architecture Documentation Suite (v2)
 
-Status: **Draft r2** · Branch: `feature/interface-pipeline-redesign`
+Status: **Draft r3** · Branch: `feature/interface-pipeline-redesign`
 Working name: `archdoc` (placeholder, see Open Questions)
 
 ## 1. Goals
 
-1. **One suite, two products.** From a single extraction of a code repository,
+1. **Accurate enough to rebuild from.** The documentation must be accurate and
+   complete enough that the system could be reimplemented from it alone, without
+   the original code. Facts are extracted, model output is grounded and verified,
+   and gaps are explicit (Section 2).
+2. **One suite, two products.** From a single extraction of a code repository,
    produce (a) PlantUML architecture diagrams and (b) Interface Control Documents
-   (ICDs). Both share the same names, the same facts and the same trust controls,
-   so they never disagree with each other.
-2. **Minimize tokens.** The LLM never needs to know *how* a function is implemented,
-   only that it exists, what it accepts and returns, and what it talks to.
-3. **Protect IP, scaled to where the model runs.** Implementation code never
-   leaves the machine. When the model is local or on the LAN, names and interface
-   details flow freely. When the model is in the cloud, identifiers are
-   pseudonymized on the way out and restored on the way back in.
-4. **Harness-ready.** The same core runs as a batch CLI or as an MCP server that
+   (ICDs), plus the behavior specifications a rebuild needs. All share the same
+   names, the same facts and the same trust controls, so they never disagree.
+3. **As much code as fits, never more than allowed.** With a local model the
+   limit is the context window: each request carries as much real code as fits,
+   packed by relevance (Section 12). With a cloud model, only the structure policy
+   allows ever leaves the machine.
+4. **Protect IP, scaled to where the model runs.** With a local or LAN model, names,
+   interface details and source flow freely (the code stays on hardware you
+   control). With a cloud model, implementation code never leaves the machine, and
+   identifiers are pseudonymized on the way out and restored on the way back in.
+5. **Harness-ready.** The same core runs as a batch CLI or as an MCP server that
    coding-agent harnesses (opencode, Mistral Vibe, and with care, Codex or Claude)
    drive, without the agent being able to read source files directly.
 
 ### Non-goals
 
-- Perfect behavioral diagrams. Without function bodies, activity and sequence
-  diagrams are approximations built from signatures and the static call graph.
+- Precise behavior in cloud mode. Without function bodies, cloud-mode activity
+  and sequence diagrams are approximations built from signatures and the static
+  call graph, and are labelled as such. Locally, behavior comes from source.
 - Writing ICD *requirements*. The suite documents interfaces as built; it does not
   invent requirements, rationale or performance figures. Gaps are marked **TBD**.
+- Legal determinations. The suite provides traceability and an overlap guard
+  (Section 2.5); whether a rebuild meets an IP requirement is not its call.
 
-## 2. Current state (problems to fix)
+## 2. Accuracy and rebuildability
+
+The documentation set must be accurate and complete enough that the system
+could be **rebuilt from the documentation alone**: for example a clean-room
+reimplementation, where the original code cannot be carried over. That
+standard governs every other choice in this design, and it rests on three rules:
+
+1. **Facts come from code.** Anything that can be extracted deterministically is
+   extracted, never generated: names, signatures, types, routes, flags, fields,
+   constraints, inheritance, imports, call edges, raised exceptions.
+2. **Model output is grounded, verified and labelled.** A model may only describe
+   what it was shown, must cite what it relied on, and is checked against the
+   extracted facts. What fails the check is repaired once, then removed and
+   reported. It is never silently kept.
+3. **Gaps are explicit.** What cannot be determined is marked **TBD**, listed,
+   and counted. Nothing is filled in by plausible guessing.
+
+### 2.1 Provenance
+
+Every item in every output belongs to exactly one class:
+
+| Class | Source | Rendered as |
+|-------|--------|-------------|
+| **fact** | extracted from code | plain text |
+| **derived** | written by a model, grounded in specific code it was shown | marked *(generated)*, with evidence in the sidecar |
+| **open** | cannot be determined from the code | **TBD**, listed in open items |
+
+Each output gets a machine-readable sidecar (`<artifact>.provenance.json`). For
+every derived statement it records:
+- the model and tier
+- the evidence ids, and the detail level each was shown at (source / outline / stub / alias)
+- the prompt version and payload hash
+- the IR hash and git commit
+
+A reviewer can therefore tell, for any sentence, whether the model read the
+actual code or only a signature.
+
+### 2.2 Grounding and verification
+
+- **Evidence is mandatory.** Every model-written statement carries an `evidence`
+  list of ids it was shown, constrained by the schema like every other reference
+  field. A statement with no evidence is rejected. This generalizes the rule already
+  used in pseudonymized mode, where text that mentions no reference is discarded.
+- **Deterministic verification against the IR**, per artifact:
+  - *Sequence:* a message that is a call to `F` must go to the participant that
+    owns `F`, from a participant that owns a function calling `F` (or from the
+    client, for the entry call). Messages from one caller must follow its source
+    call order. *(Not yet enforced; Phase 4b.)*
+  - *Activity:* every action maps to a call or control-flow node of the function.
+  - *State:* states must be enum members or values assigned to a state field.
+    Every transition must be backed by a function that assigns the target state.
+  - *ICD narrative:* referenced operations and parameters must exist (enforced).
+    Claims about errors must match recorded raises and status codes.
+- **The evidence level limits the claim.** Behavior descriptions written from full
+  source are labelled as such. When only a stub fitted the window, the statement
+  is labelled "inferred from signature" in the output, not just in the sidecar.
+
+### 2.3 What a rebuildable documentation set contains
+
+| To rebuild… | Artifact | Produced by | Status |
+|-------------|----------|-------------|--------|
+| every external interface, exactly | ICD tables (routes, CLI, env, messages) | extraction | FastAPI, argparse/Click/Typer, env: done; Flask/Django, messaging, gRPC, OpenAPI: 6 |
+| data structures | data dictionary, class diagrams | extraction | done |
+| module structure and dependencies | component diagram; dependency manifest (third-party packages and versions from requirements/pyproject) | extraction | manifest: 4c |
+| interaction behavior | sequence diagrams per entry point | model + verification | diagrams: done; verification: 4b |
+| algorithmic behavior | **behavior specifications** per public function: purpose, inputs, outputs, preconditions, side effects, errors, algorithm in prose | model, from source (local) | 4c |
+| state behavior | state diagrams | model + verification | 4d |
+| expected behavior | **test inventory**: tests as acceptance criteria (what each test exercises and asserts) | extraction + model | 4c |
+| configuration and runtime | env vars, ports, entry points, deployment diagram | extraction + model | partly done |
+
+Behavior specifications go into a design-description document alongside the ICD,
+comparable in role to a MIL-STD-498 Software Design Description (DI-IPSC-81435).
+The section mapping is to be confirmed when the template is built.
+
+Tests are read as evidence only: they don't appear as components. That way a
+user can exclude `tests/` from the diagrams and still get the test inventory.
+
+### 2.4 Coverage and rebuild readiness
+
+Each run reports, per artifact and for the whole system:
+- **interface coverage:** share of operations, parameters and fields with no TBD
+- **behavior coverage:** share of public functions with a behavior specification,
+  split by evidence level (source / outline / signature only)
+- **open items**, by kind
+
+**Rebuild-readiness check** (deterministic, Phase 6): regenerate interface stubs
+(signatures, data types, routes, CLI definitions) from the documentation alone and
+diff them against the IR. Every difference is a documentation defect: something a
+rebuilder would get wrong. An optional stronger check hands the documentation to a
+model to implement stubs, then compares those.
+
+### 2.5 Describing, not copying
+
+For a rebuild that must not carry over the original code, the documentation has to
+describe behavior rather than reproduce it:
+- **Overlap guard:** generated text is checked against the source it was given
+  for verbatim reuse (long runs of identical tokens from function bodies), and
+  flagged or rejected. Identifiers and signatures are allowed: they are the
+  interface.
+- Every document records what it was derived from (git commit, IR hash).
+
+The suite provides traceability and the overlap guard. Whether a given rebuild
+process meets a particular IP requirement is a legal question the tool does not
+answer.
+
+### 2.6 Reproducibility and review
+
+- Temperature 0, with model name and digest, prompt version, payload hash, IR hash
+  and git commit all recorded. Model output is cached on those keys, so a rerun
+  with no code or model change makes no model calls and produces identical documents.
+- **Review overlay:** human edits and approvals live in `<out>/review/`, keyed by
+  item id and the hash of the evidence they were based on. Regeneration never
+  overwrites a reviewed item. If the underlying code changes, the item is
+  flagged *stale* for re-review instead.
+- **Accuracy evaluation:** a hand-checked reference set for the fixture repo and at
+  least one real repo. Measured as precision and recall of sequence edges against
+  the call graph, error claims against raises, and a reviewer score for behavior
+  specifications. It is used to compare models and prompt versions before changing
+  defaults.
+
+## 3. Current state (problems to fix)
 
 | # | Problem | Where |
 |---|---------|-------|
@@ -39,22 +168,23 @@ Working name: `archdoc` (placeholder, see Open Questions)
 | P7 | Four near-duplicate entry scripts (vLLM/Ollama × chunked/unchunked) with copied prompts and file walking. | top level |
 | P8 | Python only. ICDs exist only as ad-hoc harness output, with no shared facts or consistency with the diagrams. | — |
 
-## 3. Trust model
+## 4. Trust model
 
-### 3.1 Trust tiers
+### 4.1 Trust tiers
 
 Every LLM backend is assigned exactly one tier. The tier picks the default
-egress policy (Section 6).
+egress policy (Section 7).
 
 | Tier | Meaning | Examples |
 |------|---------|----------|
 | `local` | Inference runs on hardware the user controls: this machine or a host on the local network. | vLLM on the DGX, Ollama with a local model, llama.cpp, LM Studio |
 | `cloud` | Inference runs on infrastructure the user does not control. | OpenAI/Codex, Anthropic/Claude, Mistral API, **Ollama cloud models** |
 
-**Bodies never leave in either tier.** In `local` that is purely a token-budget
-choice. In `cloud` it is also an IP control.
+**Source code never leaves the machine.** With a `local` model, source is sent to
+the model (which runs on hardware you control) as far as the context window allows.
+With a `cloud` model, function bodies are never sent.
 
-### 3.2 Classifying a backend
+### 4.2 Classifying a backend
 
 Backends are declared in config with an explicit tier:
 
@@ -81,26 +211,27 @@ Safety checks that run before any request:
   remote. Any model matching `[trust] cloud_model_patterns`
   (default: `["*-cloud", "*:cloud"]`) is forced to `cloud` regardless of URL.
 
-### 3.3 What crosses the boundary
+### 4.3 What crosses the boundary
 
 | Category | `local` | `cloud` |
 |----------|---------|---------|
-| Function and method bodies, comments | never | never |
-| Secrets (scanner hits) | never | never (run aborts) |
-| Arbitrary string literals | never | never |
+| Function and method bodies | as much as fits the window (level `source`) | never |
+| Comments | inside sent source only (strippable to save tokens) | never |
+| Secrets (scanner hits, including inside sent source) | never (redacted) | never (run aborts) |
+| Arbitrary string literals | inside sent source only | never |
 | Module, class, function, param names | real | **pseudonymized** |
 | Type annotations | real | pseudonymized (internal types) |
 | Docstrings | first line (opt-in: full) | none (opt-in: first line, pseudonymized) |
 | Interface literals: route paths, CLI flags, topic and queue names, field constraints | real | pseudonymized |
 | Default values | simple literals | presence only |
-| Control-flow skeletons | allowed | off (opt-in) |
+| Control-flow outlines | allowed | off (opt-in) |
 | Third-party and stdlib names | real | real |
 
 **Residual leakage in `cloud` (accepted, documented):** the *shape* of the system:
 counts, graph topology, which third-party libraries are used, HTTP methods.
 Pseudonymization hides vocabulary, not architecture.
 
-## 4. Architecture overview
+## 5. Architecture overview
 
 ```
                     LOCAL (always trusted)                       │  BACKEND (tier-dependent)
@@ -133,12 +264,12 @@ Key properties:
   `egress.build_payload()`, and every byte received goes through
   `ingress.accept()`. Both are logged and dry-runnable.
 
-## 5. Intermediate representation (IR)
+## 6. Intermediate representation (IR)
 
 `archdoc/ir.py`, plain dataclasses, JSON-serializable. The IR is always the
 *full, real* local view. Sanitizing and aliasing produce derived views of it.
 
-### 5.1 Code structure
+### 6.1 Code structure
 
 ```python
 @dataclass
@@ -185,7 +316,7 @@ class Module:
     parse_error: str | None     # reported, never fatal
 ```
 
-### 5.2 Interfaces (shared by diagrams and ICDs)
+### 6.2 Interfaces (shared by diagrams and ICDs)
 
 ```python
 @dataclass
@@ -219,7 +350,7 @@ class DataType:
     source: str                 # pydantic | dataclass | proto | openapi | jsonschema | orm
 ```
 
-### 5.3 Extractors
+### 6.3 Extractors
 
 Each extractor implements `extract(root) -> RepoIR` and adds to the interface inventory.
 
@@ -241,7 +372,7 @@ Notes:
 - Bodies are read locally for calls, raises, field constraints and interface
   detection, but are never copied into the IR.
 
-## 6. Policy
+## 7. Policy
 
 Configuration is read from up to three TOML files, each overriding the last:
 
@@ -254,7 +385,7 @@ unknown keys or values are errors (a typo must not silently loosen policy).
 
 | Key | Values | `local` default | `cloud` default |
 |-----|--------|-----------------|-----------------|
-| `level` | `none` · `interfaces` · `callgraph` · `control_flow` | `control_flow` | `callgraph` |
+| `level` | `none` · `interfaces` · `callgraph` · `control_flow` · `source` | `source` | `callgraph` |
 | `pseudonymize` | `off` · `internal` · `all` | `off` | `internal` |
 | `docstrings` | `full` · `first_line` · `none` | `first_line` | `none` |
 | `interface_literals` | `real` · `alias` · `none` | `real` | `alias` |
@@ -298,7 +429,7 @@ scan = true
 A symbol in a sensitive module is aliased *everywhere it is referenced*, including
 annotations, docstrings and decorator arguments in non-sensitive modules.
 
-### 6.1 Egress levels
+### 7.1 Egress levels
 
 Independent of tier, the level controls *how much structure* is sent:
 
@@ -308,16 +439,21 @@ Independent of tier, the level controls *how much structure* is sent:
 | `interfaces` | IR minus call edges | + deployment, object, state, use-case, ICD narrative |
 | `callgraph` | + resolved internal call edges | + sequence, ICD sequencing |
 | `control_flow` | + per-function nesting of `if/for/while/try/return` with call ids, no expressions or literals | + activity (higher fidelity) |
+| `source` | + full source of the most relevant functions, packed to fit the window (local only by default) | + behavior specifications; accurate activity, state and sequence groups |
 
-### 6.2 Secret scanning
+A level is a ceiling, not a quota: the packer (Section 12) decides how much of
+the allowed detail fits each request. `source` is implemented in Phase 4a; until
+then `control_flow` is the effective local maximum.
+
+### 7.2 Secret scanning
 
 A backstop, not the primary control. High-entropy tokens and known patterns
 (AWS keys, `sk-` keys, JWTs, private-key headers) found in anything about to egress
 are dropped (`local`) or abort the run (`cloud`).
 
-## 7. Pseudonymization (cloud tier)
+## 8. Pseudonymization (cloud tier)
 
-### 7.1 Round trip
+### 8.1 Round trip
 
 Aliasing happens **only around the LLM step**:
 
@@ -331,7 +467,7 @@ Aliasing happens **only around the LLM step**:
 Final diagrams and ICDs always contain real names. Only the LLM's view, and in
 harness mode the agent's transcript, contains aliases.
 
-### 7.2 Alias format
+### 8.2 Alias format
 
 Aliases are sigil-prefixed so they can be restored safely inside free text such as
 ICD prose, not just in JSON reference fields:
@@ -362,13 +498,13 @@ alias but is not in the map is flagged.
 - The map is stable across runs, stored at `<out>/.archdoc/alias_map.json`, and
   gitignored.
 
-### 7.3 Role hints
+### 8.3 Role hints
 
 Names carry meaning, and aliasing removes it. An optional local `roles.toml`
 (`"billing.invoices:InvoiceReconciler" = "reconciliation service"`) lets the user
 supply a neutral description that is sent instead of the real name.
 
-## 8. Diagrams
+## 9. Diagrams
 
 | Diagram | Producer | Input |
 |---------|----------|-------|
@@ -381,14 +517,14 @@ supply a neutral description that is sent instead of the real name.
 | sequence | LLM planner | call graph from a chosen entrypoint or operation, depth-limited |
 | activity | LLM planner | call graph, plus control-flow skeletons if level allows |
 
-Planner output is validated JSON (Section 10), rendered by
+Planner output is validated JSON (Section 11), rendered by
 `archdoc/render/puml/<type>.py` and checked with `plantuml -syntax` when PlantUML is
 available. The existing `repair_*` functions and the PlantUML-syntax FAISS RAG are
 not used on the v2 path.
 
-## 9. Interface Control Documents
+## 10. Interface Control Documents
 
-### 9.1 What is deterministic vs. LLM-written
+### 10.1 What is deterministic vs. LLM-written
 
 | ICD content | Source |
 |-------------|--------|
@@ -406,7 +542,7 @@ LLM never wrote. An LLM cannot add or remove a row, field or operation. In `clou
 mode, real route paths, topic names and constraints are filled in locally and never
 sent.
 
-### 9.2 Output
+### 10.2 Output
 
 - **Formats:** Markdown (default) and AsciiDoc, with PlantUML embedded as source or
   as rendered SVG. docx and PDF via pandoc (optional dependency).
@@ -417,14 +553,14 @@ sent.
     during Phase 4.
 - **Granularity:** `--icd-scope` `interface | component | system`.
 
-### 9.3 Drift check
+### 10.3 Drift check
 
 `archdoc check` compares the current interface inventory with the snapshot saved
 when the ICD was last generated (`<out>/.archdoc/icd_snapshot.json`) and reports
 added/removed operations, field type changes and removed required fields, flagging
 breaking changes. It needs no LLM, so it can run in CI.
 
-## 10. Planner (LLM step)
+## 11. Planner (LLM step)
 
 - Each LLM-produced artifact has a JSON schema in `archdoc/plan/schemas/` (eight
   diagram plans plus `icd_narrative`).
@@ -448,9 +584,117 @@ Example, sequence plan:
 (`ref` values are real ids in `local` tier and aliases in `cloud` tier. The schema is
 the same for both.)
 
-## 11. Harness integration
+## 12. Fitting the context window
 
-### 11.1 Core idea
+With a local model the limiting factor is the context window, not cost. The
+practical window is whatever `--max-model-len` (vLLM) or `num_ctx` (Ollama) fits
+in VRAM alongside the KV cache, usually well below a model's advertised limit:
+the legacy script uses 48k for Mistral Large on 4×A100. The goal is to give the
+model **as much real code as fits** for each artifact, without truncating anything
+mid-item, and without losing consistency across requests.
+
+### 12.1 Consistency does not depend on chunking
+
+The legacy pipeline had to chunk large repos, and its diagrams then disagreed on
+names. The cause was that the model produced the names: Pass 2 built the entity
+registry with an LLM, and Pass 3 wrote PlantUML freehand, so every chunk was a new
+chance to rename things. Here the model never produces a name:
+
+- names and ids come from the IR, identical in every request, diagram and ICD
+- every reference field is an enum of the ids that request exposed, and
+  ingress rejects anything else
+- renderers take display names from the IR, never from model text
+
+Work can therefore be split as finely as the window requires with no
+drift between artifacts.
+
+### 12.2 Window-aware packing
+
+- **Window size** comes from backend config (`num_ctx`, or `context` for
+  OpenAI-compatible servers). Reserved: instructions, schema, output
+  (`max_tokens`) and a safety margin. The rest is the packing budget for that request.
+- **Token counts are calibrated per model.** Backends report real prompt token
+  counts (Ollama `prompt_eval_count`, OpenAI-compatible `usage.prompt_tokens`). The
+  measured characters-per-token ratio is stored in the state directory. The first
+  request uses a conservative 3.0. If a request still overflows, it is re-packed
+  smaller and retried.
+- **Detail levels per item** (a function, class or module):
+
+  | Level | Content | Allowed |
+  |-------|---------|---------|
+  | name | id only | always |
+  | stub | signature, types, first docstring line, calls | always |
+  | outline | stub + nesting of if/for/while/try/return with call ids, no expressions | local; cloud opt-in |
+  | source | the full function or class source | local only |
+
+- **Ranking per artifact** decides who gets upgraded first:
+  - *sequence:* call-graph distance from the entry, then how often a function is called
+  - *ICD narrative:* operation handlers, then exchanged types
+  - *behavior spec:* the target function, then its callees
+  - *module summaries:* public, most-connected members first
+- **Packing:** every item in the slice starts at the minimum level the artifact
+  needs (normally stub). Items are then upgraded one level at a time in rank order
+  while they fit. If even the minimum doesn't fit, the work is split (shallower
+  slice, or per package) instead of truncating. **Nothing is ever cut
+  mid-function.**
+- The level each item received is recorded and feeds the provenance evidence
+  level (Section 2.1).
+
+### 12.3 Compact encoding
+
+The model sees Python-stub text rather than JSON. JSON remains the internal,
+audited form, and the egress log records both the JSON and the exact text sent.
+Measured with mistral-nemo's own tokenizer on three 25-function call-graph slices:
+
+| Slice | Raw source | JSON payload | Stub text |
+|-------|-----------:|-------------:|----------:|
+| archdoc `cmd_all` | 6,341 | 2,392 (38%) | 1,390 (22%) |
+| archdoc `cmd_egress` | 4,952 | 2,277 (46%) | 1,360 (27%) |
+| legacy vLLM `main` | 11,187 | 2,656 (24%) | 2,051 (18%) |
+
+The same facts cost about 40% fewer tokens as stubs, and the space saved goes
+into higher detail levels. An example of the encoding:
+
+```python
+class ItemRepo:  # shop.repo
+    db: Database
+    def get(self, item_id: int) -> Item:  # calls Database.query; raises KeyError
+```
+
+Local ids are long (`archdoc.extract.python_ast:Resolver.resolve_name`). Within
+one request, the shortest unambiguous form (`Resolver.resolve_name`) is used and
+mapped back at ingress, the same mechanism as aliases.
+
+### 12.4 Shared repo map
+
+Every request includes a compact, ranked outline of the whole system: packages,
+components, the most connected classes, and interfaces. It is capped at a fraction
+of the window (default 15%). Each chunk is therefore planned with the whole system
+in view. The map is identical across all requests in a run and is placed directly
+after the instructions, so vLLM's automatic prefix caching (and Ollama's reuse of
+the cached prompt between consecutive requests) avoids recomputing it.
+
+### 12.5 Hierarchical summaries
+
+System-level artifacts (use-case and deployment diagrams, the system ICD's scope
+section, the design-description overview) need the whole repo, which does not fit
+in one request for large codebases. This repo is ~13k tokens as stubs; pip is
+~160k. The approach:
+
+1. **Module summaries.** For each module, the model writes a structured summary
+   (responsibility, key operations, collaborators, external systems) from a pack
+   of that module (locally, as much source as fits).
+2. **Package summaries** from module summaries, then a **system summary**.
+3. System-level artifacts are planned from the summaries plus the repo map.
+
+Summaries reference ids, not free-text names, and are verified (a collaborator
+must be a real import or call edge). They are cached by content hash (module
+source hash + model + prompt version), so a rerun only re-summarizes modules
+that changed.
+
+## 13. Harness integration
+
+### 13.1 Core idea
 
 A coding agent has its own `read`, `grep`, `bash`, `write` and web tools, and will
 happily open source files, bypassing every control above. The integration has three
@@ -461,7 +705,7 @@ parts:
 2. **A restricted agent profile** with file, shell, edit and web tools disabled.
 3. **A trust tier fixed at server launch** to match the profile's model.
 
-### 11.2 Trust in harness mode
+### 13.2 Trust in harness mode
 
 The MCP server cannot see which model the harness is using, so the tier is a launch
 argument: `archdoc serve-mcp --repo ... --out ... --trust local|cloud`.
@@ -480,7 +724,7 @@ Mitigations: in the local profile, restrict the harness's enabled providers to l
 ones (both harnesses have provider enable/disable settings; confirm keys in Phase 5),
 and document the rule "switch profile, not model".
 
-### 11.3 MCP tools
+### 13.3 MCP tools
 
 Repo root, policy, output directory and tier are fixed at launch, never passed as
 tool arguments.
@@ -502,7 +746,7 @@ All responses pass through `egress`, and all submissions through `ingress`.
 In `cloud` mode the agent never sees real names: `submit_*` tools return validation
 results only, not the rendered files.
 
-### 11.4 Harness configuration sketches
+### 13.4 Harness configuration sketches
 
 > Sketches only. Config keys for both harnesses change between releases and must be
 > checked against current docs in Phase 5.
@@ -546,7 +790,7 @@ submit → fix errors).
 given the path. A misconfigured tool permission then exposes an empty directory, not
 the source.
 
-## 12. Egress auditing
+## 14. Egress auditing
 
 - `archdoc egress --dry-run --backend <name>` prints exactly what would be sent for
   each artifact under that backend's tier, with token counts, without calling a model.
@@ -554,7 +798,7 @@ the source.
   artifact, payload (or hash only, configurable), token count.
 - Ingress rejections (unknown aliases, schema failures) are logged alongside.
 
-## 13. Backends
+## 15. Backends
 
 `archdoc/backends/`:
 
@@ -564,7 +808,7 @@ the source.
 - `vllm_offline.py`: keeps the current in-process batched `LLM.generate()` for large
   batch runs on the DGX (tier `local` by definition).
 
-## 14. CLI and package layout
+## 16. CLI and package layout
 
 ```
 archdoc extract     <repo>                # write IR + interface inventory
@@ -599,14 +843,17 @@ tests/    fixtures/canary_repo/  ...
 Legacy scripts stay at the top level, untouched, until v2 reaches parity, then move
 to `legacy/`.
 
-## 15. Testing
+## 17. Testing
 
 - **Canary leak test (most important):** a fixture repo with unique canary strings in
   bodies, comments, docstrings, defaults, string literals, route paths, topic names
   and a fake AWS key. Assertions per tier:
   - `cloud`: no canary and no real internal identifier appears in any payload or
     MCP response.
-  - `local`: no body, comment, literal or secret canary appears; names may.
+  - `local`: below level `source`, no body, comment, literal or secret canary
+    appears. At level `source`, body canaries appear only for functions the packer
+    selected, and only whole. The secret canary never appears, inside sent source
+    included.
 - **Trust classification:** private vs. public hosts, undeclared backends,
   `-cloud` Ollama tags on localhost.
 - **Pseudonymization round trip:** alias → restore is the identity, including inside
@@ -620,8 +867,17 @@ to `legacy/`.
   (no model needed in CI).
 - **Drift tests:** golden reports for added/removed/changed operations and fields.
 - **Token benchmark:** v1 vs. v2 prompt tokens on this repo and one larger repo.
+- **Packing tests:** every request fits its configured window. No item is cut
+  mid-function. Upgrades follow rank order. Overflow leads to re-packing, never
+  truncation.
+- **Verification tests:** injected faults (a message to the wrong owner, an
+  out-of-order call, a state no code assigns, an error claim with no matching raise)
+  are each caught and removed with a warning.
+- **Accuracy evaluation (Section 2.6):** precision and recall of generated sequence
+  edges and error claims against the hand-checked reference set, per model and
+  prompt version; recorded, not gated in CI.
 
-## 16. Phased plan
+## 18. Phased plan
 
 Status: Phases 0 to 3 are complete on the feature branch.
 
@@ -679,21 +935,34 @@ Notes from implementation:
 | 1 | trust tiers, policy, sanitizer, secret scan, pseudonymizer round trip, egress/ingress, `egress --dry-run` | canary test passes for both tiers |
 | 2 | deterministic class + component diagrams; **deterministic ICD tables** (inventory, operations, data dictionary) in Markdown | useful ICD and two diagrams with zero LLM calls |
 | 3 | OpenAI-compatible backend, planner, sequence diagram + ICD narrative end to end | both tiers work against a local model (cloud simulated by `--trust cloud`) |
-| 4 | remaining six diagrams; ICD templates (`lightweight`, `idd`), embedded diagrams, pandoc export | all outputs produced; token benchmark recorded |
+| 4a | **Context fitting:** stub-text encoding, window config, calibrated token counts, tiered packer (name → stub → outline → source), shared repo map | same artifacts use about 40% fewer tokens at equal detail; the largest slices fit an 8k window with no truncation |
+| 4b | **Accuracy:** evidence fields, provenance sidecars, IR verification for sequence diagrams, coverage report, review overlay, verbatim-overlap guard, reference set for accuracy evaluation | every generated statement cites evidence; an injected wrong call edge is caught; coverage reported |
+| 4c | **Rebuild content:** behavior specifications from source (local), hierarchical summaries with content-hash cache, dependency manifest, test inventory | behavior coverage reported per evidence level; a rerun with no code change makes zero model calls |
+| 4d | remaining diagrams (activity, state, use-case, deployment, object), each with its own verification; `idd` template; design-description document; embedded diagrams; pandoc export | all outputs produced and verified against the IR |
 | 5 | MCP server; opencode and Vibe local/cloud profiles; `AGENTS.md` | full output set from each harness with file tools disabled |
-| 6 | drift check; Flask/Django/Celery/Kafka/SQLAlchemy detectors; `.proto` and OpenAPI extractors; tree-sitter languages; retire legacy scripts | — |
+| 6 | drift check; **rebuild-readiness check** (stubs regenerated from the documentation, diffed against the IR); Flask/Django/Celery/Kafka/SQLAlchemy detectors; `.proto` and OpenAPI extractors; tree-sitter languages; retire legacy scripts | rebuild-readiness diff is empty on the fixture |
 
-## 17. Open questions
+## 19. Open questions
 
 1. **Name.** `archdoc` is a placeholder for the suite.
 2. **ICD template.** What shape were the harness-generated ICDs? Is a
    MIL-STD-498 IDD layout wanted, a program-specific template, or something lighter?
 3. **ICD granularity default:** per interface, per component pair, or one system ICD?
-4. **Activity fidelity:** are control-flow skeletons acceptable for `local`
-   (default on) and `cloud` (default off)?
-5. **Glossary script:** fold into the ICD as an acronyms/terms appendix, or retire?
-6. **RAG corpus:** with JSON plans there is no need for PlantUML syntax examples.
+4. **Behavior specification format:** a MIL-STD-498 SDD-style document, per-module
+   Markdown, or something program-specific? How much detail per function
+   (prose only, or prose plus pseudocode)?
+5. **Unverifiable model claims:** remove them (current default) or keep them,
+   clearly marked as unverified?
+6. **Tests as evidence:** read `tests/` for the test inventory even when excluded
+   from diagrams (proposed default), or only on request?
+7. **Accuracy reference set:** which real repository, besides the fixture, should
+   anchor the hand-checked evaluation?
+8. **Glossary script:** fold into the ICD as an acronyms/terms appendix, or retire?
+9. **RAG corpus:** with JSON plans there is no need for PlantUML syntax examples.
    Retire, or repurpose (e.g. example ICD narratives)?
-7. **Target languages and interface formats after Python**, in priority order
-   (`.proto`, OpenAPI, Java, C++, ...)?
-8. **Very large repos:** per-package outputs automatically, or user-selected scopes?
+10. **Target languages and interface formats after Python**, in priority order
+    (`.proto`, OpenAPI, Java, C++, ...)?
+
+Resolved: pseudonymization is per tier (off locally, on for cloud), with reverse
+mapping of model text. Control-flow outlines and source are allowed locally; in
+cloud mode outlines are opt-in and source is never sent.

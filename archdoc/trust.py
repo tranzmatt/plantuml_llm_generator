@@ -1,7 +1,7 @@
 """
 Trust tiers: is a backend `local` (hardware the user controls) or `cloud`?
 
-Rules (docs/DESIGN.md section 3.2):
+Rules (docs/DESIGN.md section 4.2):
   - a model name matching a cloud pattern (Ollama "*-cloud" tags) is cloud,
     whatever the URL says: those are proxied through the local daemon
   - a backend with no declared tier is cloud

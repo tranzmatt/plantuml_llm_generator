@@ -3,7 +3,7 @@ Intermediate representation (IR) of a repository's code structure.
 
 The IR is the full, *real* local view of the repo: real names, real literals.
 It never contains function bodies or comments. Sanitizing and pseudonymizing
-for egress produce derived views of it (see docs/DESIGN.md sections 6-7).
+for egress produce derived views of it (see docs/DESIGN.md sections 7-8).
 
 Ids are stable strings:
   module    "pkg.mod"
