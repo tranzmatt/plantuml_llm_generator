@@ -8,6 +8,26 @@ types in one LLM call** to guarantee naming consistency and correctness.
 
 ---
 
+## 🧪 archdoc (v2, in progress)
+
+A rewrite on branch `feature/interface-pipeline-redesign`: it extracts
+**interfaces only** with Python's AST, so no function bodies ever reach a model,
+and produces both PlantUML diagrams and Interface Control Documents (ICDs).
+See [docs/DESIGN.md](docs/DESIGN.md).
+
+```bash
+pip install -e .                                   # Python 3.11+, needs jinja2
+archdoc all ~/Code/YourProject -o archdoc_out      # class + component diagrams and an ICD, no LLM
+archdoc egress ~/Code/YourProject --trust cloud    # show exactly what a cloud model would receive
+```
+
+Set `PLANTUML_JAR=/path/to/plantuml.jar` (or put `plantuml` on PATH) to
+syntax-check every generated diagram. Diagrams that need an LLM (sequence,
+activity, state, use-case, deployment, object) and ICD narrative are not yet
+implemented on this path; use the scripts below for those.
+
+---
+
 ## ✨ Features
 
 - **Three-pass generation pipeline** for 8 UML diagram types:

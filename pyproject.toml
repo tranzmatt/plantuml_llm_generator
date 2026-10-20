@@ -7,7 +7,7 @@ name = "archdoc"
 version = "0.1.0"
 description = "Interface-only architecture documentation: PlantUML diagrams and ICDs from code"
 requires-python = ">=3.11"   # tomllib
-dependencies = []
+dependencies = ["jinja2>=3.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -20,3 +20,6 @@ include = ["archdoc*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+"archdoc.render.icd" = ["templates/*/*.j2"]

@@ -1,0 +1,44 @@
+@startuml sample_app_component
+skinparam componentStyle uml2
+package "shop" as P_pkg_shop {
+  component "shop" as C_shop
+  component "shop.api" as C_shop_api
+  component "shop.cli" as C_shop_cli
+  component "shop.click_cli" as C_shop_click_cli
+  component "shop.models" as C_shop_models
+  component "shop.repo" as C_shop_repo
+  component "shop.typer_cli" as C_shop_typer_cli
+}
+package "External libraries" as P_pkg_external {
+  component "click" as X_ext_click <<external>>
+  component "fastapi" as X_ext_fastapi <<external>>
+  component "pydantic" as X_ext_pydantic <<external>>
+  component "requests" as X_ext_requests <<external>>
+  component "typer" as X_ext_typer <<external>>
+}
+interface "CLI shopctl" as I_if_cli_shop_cli_main_parser
+interface "CLI admin" as I_if_cli_shop_click_cli_admin
+interface "CLI standalone" as I_if_cli_shop_click_cli_lone
+interface "CLI typer_cli.py" as I_if_cli_shop_typer_cli_app
+interface "ENV (2 vars)" as I_if_env_sample_app
+interface "HTTP /" as I_if_http_shop_api_app
+interface "HTTP /v1/items" as I_if_http_shop_api_router
+
+C_shop ..> C_shop_models
+C_shop_api ..> C_shop_models
+C_shop_api ..> C_shop_repo
+C_shop_cli ..> C_shop_repo
+C_shop_repo ..> C_shop_models
+C_shop_api ..> X_ext_fastapi
+C_shop_click_cli ..> X_ext_click
+C_shop_models ..> X_ext_pydantic
+C_shop_repo ..> X_ext_requests
+C_shop_typer_cli ..> X_ext_typer
+I_if_cli_shop_cli_main_parser -- C_shop_cli
+I_if_cli_shop_click_cli_admin -- C_shop_click_cli
+I_if_cli_shop_click_cli_lone -- C_shop_click_cli
+I_if_cli_shop_typer_cli_app -- C_shop_typer_cli
+C_shop_api --( I_if_env_sample_app
+I_if_http_shop_api_app -- C_shop_api
+I_if_http_shop_api_router -- C_shop_api
+@enduml

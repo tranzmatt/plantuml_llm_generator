@@ -13,6 +13,10 @@ from .extract import extract_python
 from .extract.python_ast import collect_python_files
 from .policy import PolicyError, load_config
 from .pseudonym import AliasMap
+from .render.icd import anchor, build_icd_context, inventory_snapshot, render_icd
+from .render.puml import render_class_diagram, render_component_diagram
+from .render.puml.class_ import partition_modules
+from .validate import check_syntax, plantuml_command
 from .trust import TIERS, TrustError, classify
 
 
@@ -106,6 +110,134 @@ def cmd_egress(args: argparse.Namespace) -> int:
     return 0
 
 
+DETERMINISTIC_DIAGRAMS = ("class", "component")
+LLM_DIAGRAMS = ("sequence", "activity", "state", "usecase", "deployment", "object")
+
+
+def _write(path: str, text: str) -> str:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return path
+
+
+def _diagram_files(ir, types, depth, max_classes, members):
+    """[(filename stem, title, text)] for the requested deterministic diagrams."""
+    out = []
+    if "component" in types:
+        out.append((f"{ir.repo}_component", f"{ir.repo}: components",
+                    render_component_diagram(ir, f"{ir.repo}_component", depth=depth)))
+    if "class" in types:
+        n_classes = sum(1 for _ in ir.iter_classes())
+        if n_classes <= max_classes:
+            out.append((f"{ir.repo}_class", f"{ir.repo}: classes",
+                        render_class_diagram(ir, f"{ir.repo}_class", members=members)))
+        else:
+            for g, mods in partition_modules(ir, max_classes):
+                stem = f"{ir.repo}_class_{g.replace('.', '_')}"
+                out.append((stem, f"{ir.repo}: classes in {g}",
+                            render_class_diagram(ir, stem, modules=mods, members=members)))
+    return out
+
+
+def _generate_diagrams(ir, args) -> list:
+    types = [t.strip() for t in args.types.split(",") if t.strip()]
+    pending = [t for t in types if t in LLM_DIAGRAMS]
+    unknown = [t for t in types if t not in DETERMINISTIC_DIAGRAMS + LLM_DIAGRAMS]
+    if unknown:
+        raise PolicyError(f"unknown diagram type(s): {', '.join(unknown)}")
+    if pending:
+        print(f"  [SKIP] {', '.join(pending)}: needs an LLM backend (not implemented yet)")
+    written = []
+    validate = not args.no_validate and plantuml_command() is not None
+    failures = 0
+    for stem, title, text in _diagram_files(ir, types, args.component_depth, args.max_classes, args.members):
+        path = _write(os.path.join(args.output, "diagrams", f"{stem}.puml"), text)
+        status = ""
+        if validate:
+            res = check_syntax(text)
+            status = "  syntax OK" if res.ok else f"  SYNTAX ERROR line {res.line}: {res.message}"
+            failures += not res.ok
+        print(f"  wrote {path}{status}")
+        written.append({"title": title, "path": path})
+    if not validate and not args.no_validate:
+        print("  (PlantUML not found: set PLANTUML_JAR or put `plantuml` on PATH to syntax-check)")
+    if failures:
+        raise SystemExit(f"{failures} diagram(s) failed PlantUML syntax check")
+    return written
+
+
+def _generate_icd(ir, args, diagrams=None) -> None:
+    icd_dir = os.path.join(args.output, "icd")
+    links = [{"title": d["title"], "path": os.path.relpath(d["path"], icd_dir)} for d in (diagrams or [])]
+    generated = None if args.no_date else __import__("datetime").date.today().isoformat()
+    if args.scope == "system":
+        ctx = build_icd_context(ir, diagrams=links, generated=generated)
+        path = _write(os.path.join(icd_dir, f"{ir.repo}_icd.md"), render_icd(ctx, args.template))
+        print(f"  wrote {path}  ({ctx['summary']['interfaces']} interfaces, "
+              f"{ctx['summary']['operations']} operations, {len(ctx['gaps'])} open items)")
+    else:
+        for iface in ir.interfaces:
+            ctx = build_icd_context(ir, [iface], title=f"{iface.name} Interface Control Document",
+                                    diagrams=links, generated=generated)
+            path = _write(os.path.join(icd_dir, f"{anchor(iface.id)}.md"), render_icd(ctx, args.template))
+            print(f"  wrote {path}")
+    snap = os.path.join(_state_dir(args.output), "icd_snapshot.json")
+    with open(snap, "w", encoding="utf-8") as fh:
+        json.dump(inventory_snapshot(ir), fh, indent=1)
+
+
+def cmd_diagrams(args: argparse.Namespace) -> int:
+    cfg = load_config(args.repo, extra=args.config)
+    ir = extract_python(args.repo, exclude=cfg.exclude + args.exclude)
+    _generate_diagrams(ir, args)
+    return 0
+
+
+def cmd_icd(args: argparse.Namespace) -> int:
+    cfg = load_config(args.repo, extra=args.config)
+    ir = extract_python(args.repo, exclude=cfg.exclude + args.exclude)
+    if not ir.interfaces:
+        print(f"{ir.repo}: no interfaces detected; nothing to document")
+        return 0
+    _generate_icd(ir, args)
+    return 0
+
+
+def cmd_all(args: argparse.Namespace) -> int:
+    cfg = load_config(args.repo, extra=args.config)
+    ir = extract_python(args.repo, exclude=cfg.exclude + args.exclude)
+    diagrams = _generate_diagrams(ir, args)
+    if ir.interfaces:
+        _generate_icd(ir, args, diagrams)
+    return 0
+
+
+def _add_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("repo", help="Path to the repository to analyse")
+    p.add_argument("-o", "--output", default="archdoc_out", help="Output directory")
+    p.add_argument("--exclude", action="append", default=[], metavar="GLOB",
+                   help="Repo-relative glob to skip (repeatable), e.g. 'tests/*'")
+    p.add_argument("--config", help="Extra config TOML (overrides user and repo config)")
+
+
+def _add_diagram_opts(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--types", default="class,component",
+                   help=f"Comma-separated diagram types (available now: {', '.join(DETERMINISTIC_DIAGRAMS)})")
+    p.add_argument("--component-depth", type=int, help="Package depth for components (default: auto)")
+    p.add_argument("--max-classes", type=int, default=60,
+                   help="Above this many classes, write one class diagram per component")
+    p.add_argument("--members", choices=("public", "all"), default="public")
+    p.add_argument("--no-validate", action="store_true", help="Skip the PlantUML syntax check")
+
+
+def _add_icd_opts(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--scope", choices=("system", "interface"), default="system",
+                   help="One ICD for the system, or one per interface")
+    p.add_argument("--template", default="lightweight", help="Bundled template name or path to a .j2 file")
+    p.add_argument("--no-date", action="store_true", help="Omit the generation date (reproducible output)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="archdoc", description=__doc__)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -132,6 +264,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", default=True,
                    help="Accepted for clarity; egress never sends anything in this version")
     p.set_defaults(func=cmd_egress)
+
+    p = sub.add_parser("diagrams", help="Write PlantUML diagrams")
+    _add_common(p)
+    _add_diagram_opts(p)
+    p.set_defaults(func=cmd_diagrams)
+
+    p = sub.add_parser("icd", help="Write Interface Control Document(s)")
+    _add_common(p)
+    _add_icd_opts(p)
+    p.set_defaults(func=cmd_icd)
+
+    p = sub.add_parser("all", help="Diagrams and ICDs from one extraction")
+    _add_common(p)
+    _add_diagram_opts(p)
+    _add_icd_opts(p)
+    p.set_defaults(func=cmd_all)
     return ap
 
 

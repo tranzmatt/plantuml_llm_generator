@@ -623,6 +623,25 @@ to `legacy/`.
 
 ## 16. Phased plan
 
+Status: Phases 0, 1 and 2 are complete on the feature branch.
+
+Notes from implementation:
+
+- **Class diagrams on large repos** are partitioned automatically
+  (`--max-classes`, default 60): a package over the limit is split one level
+  deeper and small sibling groups are packed back together. pip (818 classes)
+  gives 18 diagrams with a median of 53 classes, each class drawn in full exactly once.
+  Related classes outside a diagram appear as member-less stubs.
+- **Component diagrams** pick the package depth that gives the most components
+  within 30. Provided interfaces are lollipops and required ones are sockets. Repos made
+  of many standalone scripts produce wide diagrams (one lollipop per CLI); layout
+  tuning is open.
+- **ICD tables** come entirely from code. Anything code cannot answer is
+  rendered as **TBD** and listed in an open-items appendix, which is also the
+  worklist for the Phase 3 narrative step. Data types are included when
+  referenced by an interface, transitively through fields.
+- `archdoc icd` saves `.archdoc/icd_snapshot.json` for the Phase 6 drift check.
+
 | Phase | Deliverable | Exit criteria |
 |-------|-------------|---------------|
 | 0 | package skeleton, IR, Python AST extractor with call resolution, framework detectors for FastAPI, argparse, Click, pydantic, dataclass | golden IR + inventory tests pass |

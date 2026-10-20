@@ -1,0 +1,142 @@
+{#- Lightweight ICD template.
+    Every table value comes from the code. Narrative slots render as TBD and
+    are listed in Appendix A until they are filled in. -#}
+# {{ title }}
+
+| | |
+|---|---|
+| System | `{{ repo }}` |
+| Generated | archdoc {{ version }}{% if generated %}, {{ generated }}{% endif %} |
+| Interfaces | {{ summary.interfaces }} ({{ summary.provided }} provided, {{ summary.required }} required) |
+| Operations | {{ summary.operations }} |
+| Data types | {{ summary.data_types }} |
+
+> Tables in this document are generated from the source code and are
+> authoritative for the version analysed. Items marked **TBD** cannot be
+> determined from code and are listed in [Appendix A](#appendix-a-open-items).
+
+## 1. Scope
+
+{{ none | tbd }}
+
+## 2. Interface summary
+
+| ID | Interface | Type | Direction | Owner | Protocol | Address | Ops |
+|----|-----------|------|-----------|-------|----------|---------|----:|
+{% for i in interfaces -%}
+| [{{ loop.index }}](#{{ i.anchor }}) | {{ i.name | code }} | {{ i.kind_label }} | {{ i.direction }} | {{ i.owner | code }} | {{ i.protocol | cell }} | {{ i.address | code }} | {{ i.operations | length }} |
+{% endfor %}
+
+## 3. Interfaces
+{% for i in interfaces %}
+
+<a id="{{ i.anchor }}"></a>
+### 3.{{ loop.index }} {{ i.name }} ({{ i.kind_label }})
+
+| | |
+|---|---|
+| Direction | {{ i.direction }} |
+| Owner | {{ i.owner | code }} |
+| Protocol | {{ i.protocol | cell }} |
+{% if i.address %}| Address | {{ i.address | code }} |
+{% endif %}| Purpose | {{ i.purpose | tbd }} |
+{% if i.kind == "env" %}
+
+| Variable | Default | Used in | Description |
+|----------|---------|---------|-------------|
+{% for op in i.operations -%}
+| <a id="{{ op.anchor }}"></a>{{ op.name | code }} | {{ op.meta.get("default") | code }} | {{ op.meta.get("used_in") | cell }} | {{ op.summary | tbd }} |
+{% endfor %}
+{% else %}
+{% set outer = loop %}
+{% for op in i.operations %}
+
+<a id="{{ op.anchor }}"></a>
+#### 3.{{ outer.index }}.{{ loop.index }} {{ op.name | code }}
+
+{{ op.summary | tbd }}
+
+{% if op.handler %}
+- **Handler:** {{ op.handler | code }}
+{% endif %}
+{% if op.request %}
+- **Request body:** {{ op.request | typecell }}
+{% endif %}
+{% if op.response %}
+- **Response:** {{ op.response | typecell }}{% if op.meta.get("status_code") %} (status {{ op.meta.get("status_code") }}){% endif %}
+
+{% elif op.meta.get("status_code") %}
+- **Success status:** {{ op.meta.get("status_code") }}
+{% endif %}
+{% if op.errors %}
+- **Errors:** {{ op.errors | join(", ") }}
+{% endif %}
+{% if op.meta.get("tags") %}
+- **Tags:** {{ op.meta.get("tags") }}
+{% endif %}
+
+{% if op.params %}
+{% if i.kind == "cli" %}
+| Argument | Type | Required | Default | Constraints | Description |
+|----------|------|----------|---------|-------------|-------------|
+{% for p in op.params -%}
+| {{ (p.flags or p.name) | code }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }} |
+{% endfor %}
+{% else %}
+| Parameter | In | Type | Required | Default | Constraints | Description |
+|-----------|----|------|----------|---------|-------------|-------------|
+{% for p in op.params -%}
+| {{ p.name | code }} | {{ p.location | cell }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }} |
+{% endfor %}
+{% endif %}
+{% else %}
+*No parameters.*
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+## 4. Data dictionary
+{% if not data_types %}
+
+*No structured data types are exchanged over these interfaces.*
+{% endif %}
+{% for d in data_types %}
+
+<a id="{{ d.anchor }}"></a>
+### 4.{{ loop.index }} {{ d.name }} ({{ d.source }})
+
+{{ d.description | tbd }}
+
+{% if d.source == "enum" %}
+Values: {% for f in d.fields %}{{ f.name | code }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+{% else %}
+| Field | Type | Required | Default | Constraints | Description |
+|-------|------|----------|---------|-------------|-------------|
+{% for f in d.fields -%}
+| {{ f.name | code }} | {{ f.type | typecell }} | {{ f.required | yn }} | {{ f.default | code }} | {{ f.constraints | cell }} | {{ f.description | tbd }} |
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+<a id="appendix-a-open-items"></a>
+## Appendix A. Open items
+
+{% if gaps %}
+| # | Where | Open item |
+|--:|-------|-----------|
+{% for g in gaps -%}
+| {{ loop.index }} | {% if g.anchor %}[{{ g.where | cell }}](#{{ g.anchor }}){% else %}{{ g.where | cell }}{% endif %} | {{ g.what }} |
+{% endfor %}
+{% else %}
+None.
+{% endif %}
+{% if diagrams %}
+
+## Appendix B. Diagrams
+
+{% for dgm in diagrams -%}
+- [{{ dgm.title }}]({{ dgm.path }})
+{% endfor %}
+{% endif %}

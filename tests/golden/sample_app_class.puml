@@ -1,0 +1,45 @@
+@startuml sample_app_class
+set namespaceSeparator none
+hide empty members
+skinparam classAttributeIconSize 0
+package "shop.models" as P_shop_models {
+  class "Item" as C_shop_models_Item <<pydantic>> {
+    +id : int
+    +name : str
+    +price : float
+    +status : Status
+    +tags : List[str]
+    +note : Optional[str]
+  }
+  class "Order" as C_shop_models_Order <<dataclass>> {
+    +order_id : str
+    +items : List[Item]
+    +total() : float
+  }
+  enum "Status" as C_shop_models_Status {
+    ACTIVE
+    RETIRED
+  }
+}
+package "shop.repo" as P_shop_repo {
+  class "CachedRepo" as C_shop_repo_CachedRepo {
+    +get(item_id: int) : Item
+  }
+  class "Database" as C_shop_repo_Database {
+    +query(sql: str) : dict
+  }
+  class "ItemRepo" as C_shop_repo_ItemRepo {
+    +db : Database
+    +__init__(db: Database)
+    +get(item_id: int) : Item
+    +make_order() : 'models.Order'
+  }
+}
+
+C_shop_models_Item *-- C_shop_models_Status : status
+C_shop_models_Order *-- "*" C_shop_models_Item : items
+C_shop_repo_ItemRepo --> C_shop_repo_Database : db
+C_shop_repo_ItemRepo ..> C_shop_models_Item : creates
+C_shop_repo_ItemRepo ..> C_shop_models_Order : creates
+C_shop_repo_ItemRepo <|-- C_shop_repo_CachedRepo
+@enduml
