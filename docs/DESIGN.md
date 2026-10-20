@@ -159,6 +159,7 @@ class Function:
     visibility: str             # public | protected | private
     docstring: str | None
     calls: list[str]            # resolved ids, or "ext:requests.get"
+    creates: list[str]          # class ids instantiated (drives "creates" edges)
     raises: list[str]
 
 @dataclass
@@ -180,6 +181,8 @@ class Module:
     classes: list[Class]
     functions: list[Function]
     docstring: str | None
+    has_main: bool              # contains `if __name__ == "__main__":`
+    parse_error: str | None     # reported, never fatal
 ```
 
 ### 5.2 Interfaces (shared by diagrams and ICDs)
@@ -200,11 +203,13 @@ class Interface:
 @dataclass
 class Operation:
     id: str
-    name: str                   # "POST /invoices/{id}", "--dry-run", "invoice.created"
+    name: str                   # "POST /invoices/{id}", "serve", "invoice.created"
+    params: list[Field]         # path/query params, CLI options (constraints["in"] / ["flags"])
     request: TypeRef | None
     response: TypeRef | None
     errors: list[str]           # status codes, raised exceptions, exit codes
     handler: str | None         # Function id
+    meta: dict[str, str]        # e.g. {"status_code": "201"}
 
 @dataclass
 class DataType:

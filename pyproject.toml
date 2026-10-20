@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "archdoc"
+version = "0.1.0"
+description = "Interface-only architecture documentation: PlantUML diagrams and ICDs from code"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+archdoc = "archdoc.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["archdoc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
