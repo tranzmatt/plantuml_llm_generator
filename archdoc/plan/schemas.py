@@ -145,7 +145,8 @@ def group_summary_schema(parts: List[str], collaborators: List[str], external: L
 
 
 def tests_schema(tests: List[str]) -> Dict[str, Any]:
-    return _obj({"tests": {"type": "array", "minItems": len(tests), "maxItems": len(tests),
+    # completeness is checked after parsing (check_tests), so a partial answer can be repaired or kept
+    return _obj({"tests": {"type": "array", "maxItems": len(tests),
                            "items": _obj({"ref": _ref(tests), "criterion": _TEXT})}})
 
 

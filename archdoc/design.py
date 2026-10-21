@@ -36,6 +36,7 @@ from .secrets_scan import redact
 from .testsuite import build_inventory, exercised_by, is_test_path
 
 EVIDENCE = {"source": "source", "outline": "outline", "stub": "signature"}
+TESTS_PER_REQUEST = 12
 
 
 @dataclass
@@ -281,18 +282,24 @@ def build_design_context(ir: RepoIR, ir_all: RepoIR, root: str, llm: Optional[Pl
         by_mod: Dict[str, List[Dict[str, Any]]] = {}
         for t in ctx["tests"]:
             by_mod.setdefault(t["module"], []).append(t)
-        for mid, items in by_mod.items():
-            exercised = list(dict.fromkeys(x for t in items for x in t["exercises"] if ":" in x))
-            res = plan_tests(llm, mid, [t["id"] for t in items], exercised, ir_all)
-            record(f"tests:{mid}", res)
-            if not res.ok:
-                say(f"[FAIL] criteria for {mid}: {'; '.join(res.errors[:2])}")
-                continue
-            got = {x["ref"]: x["criterion"] for x in res.plan["tests"] if x["criterion"]}
-            for t in items:
-                if got.get(t["id"]):
-                    t["criterion"], t["criterion_generated"] = got[t["id"]], True
-            say(f"criteria for {mid}: {len(got)}/{len(items)} ({_how(res)})")
+        for mid, all_items in by_mod.items():
+            # in batches: one sentence per test, but 38 tests overran a 2k-token answer
+            for start in range(0, len(all_items), TESTS_PER_REQUEST):
+                items = all_items[start:start + TESTS_PER_REQUEST]
+                part = f"{mid}[{start // TESTS_PER_REQUEST}]" if len(all_items) > TESTS_PER_REQUEST else mid
+                exercised = list(dict.fromkeys(x for t in items for x in t["exercises"] if ":" in x))
+                res = plan_tests(llm, mid, [t["id"] for t in items], exercised, ir_all)
+                record(f"tests:{part}", res)
+                for t in items:
+                    t["request_key"] = f"tests:{part}"
+                if not res.ok:
+                    say(f"[FAIL] criteria for {part}: {'; '.join(res.errors[:2])}")
+                    continue
+                got = {x["ref"]: x["criterion"] for x in res.plan["tests"] if x["criterion"]}
+                for t in items:
+                    if got.get(t["id"]):
+                        t["criterion"], t["criterion_generated"] = got[t["id"]], True
+                say(f"criteria for {part}: {len(got)}/{len(items)} ({_how(res)})")
 
     ctx["coverage"] = design_coverage(ctx, len(targets))
     return ctx
@@ -364,7 +371,8 @@ def design_items(ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
     for t in ctx["tests"]:
         items.append({"id": f"test:{t['id']}", "class": "fact", "evidence": [t["id"]] + t["exercises"]})
         if t["criterion_generated"]:
-            items.append({"id": f"criterion:{t['id']}", "class": "derived", "request": idx.get(f"tests:{t['module']}"),
+            items.append({"id": f"criterion:{t['id']}", "class": "derived",
+                          "request": idx.get(t.get("request_key", f"tests:{t['module']}")),
                           "evidence": [t["id"]]})
     items.append({"id": "manifest", "class": "fact", "evidence": ctx["manifest"]["files"]})
     return items

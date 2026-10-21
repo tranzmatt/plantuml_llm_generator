@@ -880,6 +880,22 @@ so a key glued to more characters (`"AKIA...J"[:20]`) passed. It no longer does.
   tests with criteria, public functions exercised directly by a test, and
   dependency issues, printed and in `design_coverage.json`.
 
+Measured (mistral-nemo:12b on the laptop RTX 3060, Mistral Medium 3.5 on the
+DGX1 vLLM): on the celebrity repo every one of 23 public functions was specified
+from source by both models, with all 7 module summaries and the system summary
+(nemo 8.4 min, 47 requests; Mistral Medium 27.5 min, about 40 s a request on a
+loaded server). A rerun with no change sent nothing and produced a
+byte-identical document in 0.4 s. On this repo (59 modules, 6 packages) nemo
+wrote every module, package and system summary and criteria for 219 tests.
+Test criteria go 12 tests to a request: a 38-test module overran the
+2,048-token answer in one.
+
+The shared repo map (12.4) is part of every request, so adding or removing a
+module, or changing a module's docstring or interfaces, changes every request
+and misses the whole cache; edits inside functions do not. That trade-off
+favours consistent answers (every request sees the same system) over cache
+hits after structural changes.
+
 Not yet: review-overlay entries for specifications and summaries (they are
 regenerated, or replayed from the cache), the SDD layout (4d), and checking an
 algorithm's steps against the outline (a step naming a call the function

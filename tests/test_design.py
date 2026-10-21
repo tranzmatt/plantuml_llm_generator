@@ -44,7 +44,7 @@ def auto_answer(schema, text="does the thing", i=0):
     if t == "object":
         return {k: auto_answer(v, text, i) for k, v in schema["properties"].items()}
     if t == "array":
-        n = 0 if schema.get("maxItems") == 0 else max(1, schema.get("minItems", 1))
+        n = 0 if schema.get("maxItems") == 0 else max(1, schema.get("minItems", schema.get("maxItems", 1)))
         return [auto_answer(schema["items"], text, j) for j in range(n)]
     if t == "boolean":
         return False
@@ -413,3 +413,35 @@ def test_cloud_hierarchy_passes_the_aliased_wording_upward(ir):
     assert "shop" in out["modules"][1]["summary"]["responsibility"]          # restored for the reader
     pkg = next(_payload_text(c) for c in ctx.backend.calls if "package:" in _payload_text(c))
     assert "Handles @M" in pkg and _word_hits({"t": pkg}, CLOUD_FORBIDDEN) == []
+
+
+def test_large_test_modules_are_batched(tmp_path):
+    shutil.copytree(FIXTURE, tmp_path / "app")
+    body = "\n".join(f"def test_case_{i}():\n    assert {i} == {i}\n" for i in range(30))
+    _write(tmp_path / "app", "tests/test_many.py", body)
+    root = str(tmp_path / "app")
+    documented = extract_python(root, exclude=["tests/*"])
+    ir_all = extract_python(root)
+    llm = _ctx(documented, root=root)
+    out = build_design_context(documented, ir_all, root, llm, DesignOptions(behavior=False, summaries=False))
+    assert len(llm.backend.calls) == 3                            # 12 + 12 + 6
+    assert out["coverage"]["tests"]["with_criterion"] == 30
+    reqs = {i["request"] for i in design_items(out) if i["id"].startswith("criterion:")}
+    assert reqs == {0, 1, 2}
+
+
+def test_partial_criteria_are_kept(tmp_path):
+    from archdoc.plan.artifacts import plan_tests
+    shutil.copytree(FIXTURE, tmp_path / "app")
+    _write(tmp_path / "app", "tests/test_two.py", "def test_a():\n    assert 1\n\n\ndef test_b():\n    assert 2\n")
+    root = str(tmp_path / "app")
+    ir_all = extract_python(root)
+
+    def lazy(system, user, schema):                  # always leaves test_b out
+        return json.dumps({"tests": [{"ref": schema["properties"]["tests"]["items"]["properties"]["ref"]["enum"][0],
+                                      "criterion": "A holds."}]})
+
+    res = plan_tests(_ctx(ir_all, respond=lazy, root=root), "tests.test_two",
+                     ["tests.test_two:test_a", "tests.test_two:test_b"], [], ir_all)
+    assert res.ok and res.attempts == 2 and [t["ref"] for t in res.plan["tests"]] == ["tests.test_two:test_a"]
+    assert res.warnings == ["no criterion for: tests.test_two:test_b"]

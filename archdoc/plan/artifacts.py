@@ -500,8 +500,15 @@ def plan_tests(ctx: PlanContext, mid: str, test_ids: List[str], exercised: List[
                                    detail=detail, root=ctx.root)
 
     real = [t for t in test_ids if ir.find_function(t)]
-    return _plan_packed(ctx, build, real, lambda a: tests_schema(a["tests"]), prompts.tests_prompts,
-                        lambda plan: check_tests(plan, real), what="the test module")
+    result = _plan_packed(ctx, build, real, lambda a: tests_schema(a["tests"]), prompts.tests_prompts,
+                          lambda plan: check_tests(plan, real), what="the test module")
+    if not result.ok and result.candidate is not None and not check_tests(result.candidate):
+        # still missing some after the repair round: keep the criteria it did write
+        missing = check_tests(result.candidate, real)
+        result.plan, result.raw, result.errors = result.candidate, result.candidate_raw, []
+        result.warnings += missing + overlap_guard.enforce(ctx.overlap, result.plan,
+                                                           overlap_guard.plan_texts(result.plan))
+    return result
 
 
 __all__ = ["CLIENT", "PlanContext", "check_activity", "check_behavior", "check_narrative", "check_sequence", "check_summary",
