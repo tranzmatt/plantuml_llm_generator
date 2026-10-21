@@ -245,7 +245,7 @@ def _sequence_files(ir, args, llm):
         for w in result.warnings + warnings:
             print(f"  [WARN] {stem}: {w}")
         ids = call_slice(ir, e.handler, llm.depth, llm.max_nodes)
-        prov = {"producer": "llm", "items": provenance.sequence_items(ir, result, ids),
+        prov = {"producer": "llm", "items": provenance.sequence_items(ir, result, ids, e.handler),
                 "requests": [provenance.request_record(result, llm)],
                 "extra": {"llm": provenance.llm_header(llm), "entry": e.handler,
                           "verification": {k: v for k, v in result.report.items() if k != "slice"},

@@ -123,14 +123,24 @@ def flow_items(flow) -> List[Dict[str, Any]]:
             for i, st in enumerate(flow.steps) if st.kind in ("invoke", "publish", "deliver", "unconsumed")]
 
 
-def sequence_items(ir: RepoIR, result, slice_ids: List[str]) -> List[Dict[str, Any]]:
+def sequence_items(ir: RepoIR, result, slice_ids: List[str], entry: Optional[str] = None) -> List[Dict[str, Any]]:
     fns = {f: ir.find_function(f) for f in slice_ids}
     items = []
+    calls_so_far: List[Dict[str, Any]] = []
     for i, m in enumerate(result.plan["messages"]):
         call = m.get("call") or ""
         callers = sorted(f for f, fn in fns.items() if fn and call in fn.calls and participant_of(f) == m["from"])
+        evidence = ([call] if call else []) + callers
+        if not call and m.get("reply"):
+            # a return cites the latest call it answers
+            answered = next((c for c in reversed(calls_so_far) if (c["from"], c["to"]) == (m["to"], m["from"])), None)
+            evidence = list(answered["evidence"][:1]) if answered else []
+        elif not call and entry and participant_of(entry) == m["to"]:
+            evidence = [entry]                       # the entry invocation, written without "call"
         item = {"id": f"message[{i}]", "class": "derived", "verified": True, "from": m["from"], "to": m["to"],
-                "call": call or None, "evidence": ([call] if call else []) + callers, "request": 0}
+                "call": call or None, "evidence": evidence, "request": 0}
+        if not m.get("reply"):
+            calls_so_far.append(item)
         if m.get("label"):
             item["label"] = {"class": "derived", "text": m["label"]}
         elif call:

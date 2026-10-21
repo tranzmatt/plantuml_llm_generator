@@ -378,6 +378,9 @@ def test_cli_all_with_llm(tmp_path, monkeypatch, capsys):
     assert msgs and all(m["class"] == "derived" and m["verified"] for m in msgs)
     get = next(m for m in msgs if m["call"] == "shop.repo:ItemRepo.get")
     assert get["evidence"] == ["shop.repo:ItemRepo.get", "shop.api:read_item"]     # callee, then its caller
+    assert msgs[0]["evidence"] == ["shop.api:read_item"]                            # the entry call
+    replies = [m for m in msgs if m["call"] is None and m["from"] != "client" and m is not msgs[0]]
+    assert all(m["evidence"] for m in replies)                                     # the call each answers
 
     # ICD: fact / derived / open per slot; derived slots point at the request that wrote them
     icd = json.loads((out / "icd" / "sample_app_icd.provenance.json").read_text())
