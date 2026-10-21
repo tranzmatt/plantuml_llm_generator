@@ -93,12 +93,36 @@ class Module:
 
 
 @dataclass
+class Service:
+    """One service of a deployment file. Environment values are never kept:
+    `env` maps each variable name to where its value comes from."""
+    name: str
+    image: Optional[str] = None
+    build: Optional[str] = None        # build context, repo-relative
+    dockerfile: Optional[str] = None   # repo-relative, if found
+    modules: List[str] = field(default_factory=list)    # module ids packaged into the image
+    entry_module: Optional[str] = None                  # what the container runs
+    ports: List[str] = field(default_factory=list)      # "host:container" as written
+    depends_on: List[str] = field(default_factory=list)
+    env: Dict[str, str] = field(default_factory=dict)   # name -> "host" | "literal" | "unset"
+    placement: List[str] = field(default_factory=list)  # e.g. "node.hostname == bio-host"
+
+
+@dataclass
+class Deployment:
+    file: str                          # repo-relative
+    kind: str = "docker-compose"
+    services: List[Service] = field(default_factory=list)
+
+
+@dataclass
 class RepoIR:
     repo: str
     language: str = "python"
     modules: List[Module] = field(default_factory=list)
     interfaces: List[Interface] = field(default_factory=list)
     data_types: List[DataType] = field(default_factory=list)
+    deployments: List[Deployment] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         return asdict(self)

@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Set
 
 from .ir import EXTERNAL_PREFIX, RepoIR
+from .deployment import deployment_issues
 from .messaging import wiring_issues
 
 # import root -> (interface kind, direction, human description)
@@ -148,6 +149,7 @@ def icd_coverage(context: Dict[str, Any], ir: RepoIR) -> Dict[str, Any]:
         "open_items": len(context["gaps"]),
         "known_unknowns": [asdict(u) | {"text": u.text} for u in unknowns],
         "message_wiring": wiring_issues(ir),
+        "deployment": deployment_issues(ir),
     }
 
 
@@ -173,4 +175,11 @@ def coverage_lines(cov: Dict[str, Any]) -> List[str]:
             lines.append(f"        {w['channel']}: {w['issue']} ({w['modules']})")
         if len(wiring) > 12:
             lines.append(f"        ... and {len(wiring) - 12} more (see coverage.json)")
+    dep = cov.get("deployment") or []
+    if dep:
+        lines.append(f"  [GAP] {len(dep)} disagreement(s) between deployment files and code:")
+        for d in dep[:12]:
+            lines.append(f"        {d['file']}: {d['where']}: {d['issue']}")
+        if len(dep) > 12:
+            lines.append(f"        ... and {len(dep) - 12} more (see coverage.json)")
     return lines

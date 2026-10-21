@@ -70,7 +70,7 @@ def test_no_known_unknowns_left(ir):
 def test_channels_and_wiring(ir):
     chans = {c.name: c for c in channels(ir)}
     assert set(chans) == {"jobs", "results", "audit"}
-    assert [e.module for e in chans["jobs"].publishers] == ["ui.app"]
+    assert [e.module for e in chans["jobs"].publishers] == ["ui.app", "worker.extra.replay"]
     assert [e.module for e in chans["jobs"].consumers] == ["worker.app"]
     issues = wiring_issues(ir)
     assert {(w["channel"], w["issue"]) for w in issues} == {
@@ -83,8 +83,8 @@ def test_component_diagram_draws_the_broker(ir):
     text = render_component_diagram(ir, "mq")
     assert 'node "RabbitMQ"' in text
     assert 'queue "results"' in text and "<<direct exchange>>" in text
-    assert "C_ui --> Q_mq_RabbitMQ_queue_jobs" in text
-    assert "Q_mq_RabbitMQ_queue_jobs --> C_worker" in text
+    assert "C_ui_app --> Q_mq_RabbitMQ_queue_jobs" in text
+    assert "Q_mq_RabbitMQ_queue_jobs --> C_worker_app" in text
     assert "MESSAGE" not in text                                   # no per-module lollipops
 
 

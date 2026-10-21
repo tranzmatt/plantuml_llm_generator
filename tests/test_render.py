@@ -180,7 +180,7 @@ def test_icd_gaps_cover_every_tbd(ir):
     text = render_icd(ctx)
     gaps = {(g["where"], g["what"]) for g in ctx["gaps"]}
     assert ("shop.api.router / POST /", "operation description") in gaps
-    assert ("Environment / SHOP_SECRET", "default value (none in code: required?)") in gaps
+    assert not any(w == "Environment / SHOP_SECRET" and "default" in x for w, x in gaps)   # required: a fact
     # every interface has a purpose gap, and the body has no raw None
     assert sum(1 for g in ctx["gaps"] if g["what"] == "interface purpose") == 7
     assert "None" not in text.replace("`None`", "")

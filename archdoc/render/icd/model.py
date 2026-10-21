@@ -119,8 +119,8 @@ class _Builder:
         }
         if iface.kind == "http" and op.response is None:
             self.gap(where, "response type", link)
-        if iface.kind == "env" and "default" not in op.meta:
-            self.gap(where, "default value (none in code: required?)", link)
+        if iface.kind == "env" and "default" not in op.meta and "required_in" not in op.meta:
+            self.gap(where, "default value", link)
         return out
 
     def interface(self, iface: Interface) -> Dict[str, Any]:

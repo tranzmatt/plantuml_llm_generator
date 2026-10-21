@@ -1,13 +1,21 @@
 import json
+import os
 import uuid
 
 import gradio as gr
 import pika
 
 
+def required(name):
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(name)
+    return value
+
+
 def submit(text):
     request_id = str(uuid.uuid4())
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host="broker"))
+    connection = pika.BlockingConnection(pika.ConnectionParameters(host=required("BROKER_HOST"), port=int(os.getenv("BROKER_PORT", "5672"))))
     channel = connection.channel()
     channel.exchange_declare(exchange="results", exchange_type="direct", durable=True)
     reply = channel.queue_declare(queue="", exclusive=True)

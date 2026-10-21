@@ -1,0 +1,20 @@
+services:
+  broker:
+    image: rabbitmq:3-management
+    ports: ["5672:5672"]
+  ui:
+    build: ./ui
+    ports:
+      - "7861:7861"
+    environment:
+      - BROKER_HOST=${BROKER_HOST}
+      - BROKER_PASS=hunter2
+    depends_on: [broker]
+  worker:
+    build:
+      context: ./worker
+    environment:
+      BROKER_HOST: broker
+      UNUSED_FLAG: "1"
+      PYTHONUNBUFFERED: "1"
+    depends_on: [broker]

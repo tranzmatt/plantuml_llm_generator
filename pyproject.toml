@@ -7,7 +7,7 @@ name = "archdoc"
 version = "0.1.0"
 description = "Interface-only architecture documentation: PlantUML diagrams and ICDs from code"
 requires-python = ">=3.11"   # tomllib
-dependencies = ["jinja2>=3.1", "jsonschema>=4"]
+dependencies = ["jinja2>=3.1", "jsonschema>=4", "pyyaml>=6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

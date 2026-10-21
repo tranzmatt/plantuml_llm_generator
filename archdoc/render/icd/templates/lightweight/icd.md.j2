@@ -54,10 +54,10 @@
 {% endif %}| Purpose | {{ i.purpose | tbd }}{% if i.purpose_generated %} *(generated)*{% endif %} |
 {% if i.kind == "env" %}
 
-| Variable | Default | Used in | Description |
-|----------|---------|---------|-------------|
+| Variable | Default | Required (no default) in | Used in | Description |
+|----------|---------|--------------------------|---------|-------------|
 {% for op in i.operations -%}
-| <a id="{{ op.anchor }}"></a>{{ op.name | code }} | {{ op.meta.get("default") | code }} | {{ op.meta.get("used_in") | cell }} | {{ op.summary | tbd }}{% if op.summary_generated %} *(generated)*{% endif %} |
+| <a id="{{ op.anchor }}"></a>{{ op.name | code }} | {% if op.meta.get("defaults_differ") %}differs by module{% else %}{{ op.meta.get("default") | code }}{% endif %} | {{ op.meta.get("required_in") | cell }} | {{ op.meta.get("used_in") | cell }} | {{ op.summary | tbd }}{% if op.summary_generated %} *(generated)*{% endif %} |
 {% endfor %}
 {% else %}
 {% set outer = loop %}
@@ -193,6 +193,20 @@ tell which.
 | {{ w.channel | code }} | {{ w.issue | cell }} | {{ w.modules | cell }} |
 {% endfor %}
 {% endif %}
+{% if coverage and coverage.deployment %}
+
+<a id="appendix-a4"></a>
+### A.4 Deployment files that disagree with the code
+
+Each row is a place where a deployment file and the code say different things.
+Which one is right is a decision for whoever rebuilds the system.
+
+| File | Where | Issue |
+|------|-------|-------|
+{% for d in coverage.deployment -%}
+| {{ d.file | code }} | {{ d.where | code }} | {{ d.issue | cell }} |
+{% endfor %}
+{% endif %}
 {% if coverage %}
 
 ## Appendix C. Coverage
@@ -206,6 +220,7 @@ tell which.
 
 Interface technologies used but not extracted: **{{ coverage.known_unknowns | length }}**.
 {% if coverage.message_wiring is defined %}Message channels with a missing end: **{{ coverage.message_wiring | length }}**.
+{% endif %}{% if coverage.deployment is defined %}Deployment disagreements with the code: **{{ coverage.deployment | length }}**.
 {% endif %}{% endif %}
 {% if diagrams %}
 

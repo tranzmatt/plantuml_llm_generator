@@ -6,6 +6,7 @@ extractor, only record names, signatures and interface literals.
 
 from .cli import detect_argparse, detect_click_typer
 from .env import detect_env_vars
+from .compose import detect_compose
 from .fastapi import detect_fastapi
 from .gradio import detect_gradio
 from .messaging import detect_pika
@@ -19,6 +20,7 @@ DEFAULT_DETECTORS = [
     detect_gradio,
     detect_pika,
     detect_env_vars,
+    detect_compose,
 ]
 
 __all__ = ["DEFAULT_DETECTORS"]

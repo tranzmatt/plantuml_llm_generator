@@ -151,10 +151,10 @@ Export items.
 | Protocol | process environment |
 | Purpose | **TBD** |
 
-| Variable | Default | Used in | Description |
-|----------|---------|---------|-------------|
-| <a id="if-env-sample-app-shop-db-url"></a>`SHOP_DB_URL` | `'sqlite://'` | shop.api | **TBD** |
-| <a id="if-env-sample-app-shop-secret"></a>`SHOP_SECRET` | — | shop.api | **TBD** |
+| Variable | Default | Required (no default) in | Used in | Description |
+|----------|---------|--------------------------|---------|-------------|
+| <a id="if-env-sample-app-shop-db-url"></a>`SHOP_DB_URL` | `'sqlite://'` | — | shop.api | **TBD** |
+| <a id="if-env-sample-app-shop-secret"></a>`SHOP_SECRET` | — | shop.api | shop.api | **TBD** |
 
 <a id="if-http-shop-api-app"></a>
 ### 3.6 shop.api.app (HTTP API)
@@ -269,19 +269,18 @@ Values: `ACTIVE`, `RETIRED`
 | 24 | [Environment](#if-env-sample-app) | Which variables are secrets |
 | 25 | [Environment / SHOP_DB_URL](#if-env-sample-app-shop-db-url) | operation description |
 | 26 | [Environment / SHOP_SECRET](#if-env-sample-app-shop-secret) | operation description |
-| 27 | [Environment / SHOP_SECRET](#if-env-sample-app-shop-secret) | default value (none in code: required?) |
-| 28 | [shop.api.app](#if-http-shop-api-app) | interface purpose |
-| 29 | [shop.api.app](#if-http-shop-api-app) | Authentication / authorization |
-| 30 | [shop.api.app](#if-http-shop-api-app) | Rate limits and timeouts |
-| 31 | [shop.api.app](#if-http-shop-api-app) | API versioning policy |
-| 32 | [shop.api.app / GET /health](#if-http-shop-api-app-get-health) | operation description |
-| 33 | [shop.api.router](#if-http-shop-api-router) | interface purpose |
-| 34 | [shop.api.router](#if-http-shop-api-router) | Authentication / authorization |
-| 35 | [shop.api.router](#if-http-shop-api-router) | Rate limits and timeouts |
-| 36 | [shop.api.router](#if-http-shop-api-router) | API versioning policy |
-| 37 | [shop.api.router / GET /{item_id}](#if-http-shop-api-router-get-item-id) | description of `item_id` |
-| 38 | [shop.api.router / GET /{item_id}](#if-http-shop-api-router-get-item-id) | description of `verbose` |
-| 39 | [shop.api.router / GET /{item_id}](#if-http-shop-api-router-get-item-id) | description of `limit` |
-| 40 | [shop.api.router / POST /](#if-http-shop-api-router-post) | operation description |
-| 41 | [Item](#dt-shop-models-item) | field descriptions (`id`, `price`, `status`, `tags`) |
-| 42 | [Status](#dt-shop-models-status) | data type description |
+| 27 | [shop.api.app](#if-http-shop-api-app) | interface purpose |
+| 28 | [shop.api.app](#if-http-shop-api-app) | Authentication / authorization |
+| 29 | [shop.api.app](#if-http-shop-api-app) | Rate limits and timeouts |
+| 30 | [shop.api.app](#if-http-shop-api-app) | API versioning policy |
+| 31 | [shop.api.app / GET /health](#if-http-shop-api-app-get-health) | operation description |
+| 32 | [shop.api.router](#if-http-shop-api-router) | interface purpose |
+| 33 | [shop.api.router](#if-http-shop-api-router) | Authentication / authorization |
+| 34 | [shop.api.router](#if-http-shop-api-router) | Rate limits and timeouts |
+| 35 | [shop.api.router](#if-http-shop-api-router) | API versioning policy |
+| 36 | [shop.api.router / GET /{item_id}](#if-http-shop-api-router-get-item-id) | description of `item_id` |
+| 37 | [shop.api.router / GET /{item_id}](#if-http-shop-api-router-get-item-id) | description of `verbose` |
+| 38 | [shop.api.router / GET /{item_id}](#if-http-shop-api-router-get-item-id) | description of `limit` |
+| 39 | [shop.api.router / POST /](#if-http-shop-api-router-post) | operation description |
+| 40 | [Item](#dt-shop-models-item) | field descriptions (`id`, `price`, `status`, `tags`) |
+| 41 | [Status](#dt-shop-models-status) | data type description |

@@ -22,7 +22,7 @@ from .plan.artifacts import PlanContext, plan_narrative, plan_sequence
 from .plan.entries import select_entries
 from .render.icd import anchor, apply_narrative, build_icd_context, inventory_snapshot, render_icd
 from .render.puml.sequence import render_sequence_diagram
-from .render.puml import render_class_diagram, render_component_diagram
+from .render.puml import render_class_diagram, render_component_diagram, render_deployment_diagram
 from .render.puml.class_ import partition_modules
 from .validate import check_syntax, plantuml_command
 from .trust import CLOUD, TIERS, Backend, TrustError, classify
@@ -118,9 +118,9 @@ def cmd_egress(args: argparse.Namespace) -> int:
     return 0
 
 
-DETERMINISTIC_DIAGRAMS = ("class", "component")
+DETERMINISTIC_DIAGRAMS = ("class", "component", "deployment")
 PLANNED_DIAGRAMS = ("sequence",)
-LLM_DIAGRAMS = PLANNED_DIAGRAMS + ("activity", "state", "usecase", "deployment", "object")
+LLM_DIAGRAMS = PLANNED_DIAGRAMS + ("activity", "state", "usecase", "object")
 DEFAULT_URLS = {"ollama": "http://localhost:11434"}
 
 
@@ -268,6 +268,11 @@ def _diagram_files(ir, types, depth, max_classes, members):
                 stem = f"{ir.repo}_class_{g.replace('.', '_')}"
                 out.append((stem, f"{ir.repo}: classes in {g}",
                             render_class_diagram(ir, stem, modules=mods, members=members)))
+    if "deployment" in types:
+        for dep in ir.deployments:
+            stem = f"{ir.repo}_deployment_{re.sub(r'[^A-Za-z0-9]+', '_', dep.file.rsplit('.', 1)[0]).strip('_')}"
+            out.append((stem, f"{ir.repo}: deployment ({dep.file})",
+                        render_deployment_diagram(ir, dep, stem, title=f"Deployment: {dep.file}")))
     return out
 
 
@@ -421,8 +426,8 @@ def _add_llm_opts(p: argparse.ArgumentParser) -> None:
 
 
 def _add_diagram_opts(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--types", default="class,component",
-                   help="Comma-separated: class, component (no LLM); sequence (LLM)")
+    p.add_argument("--types", default="class,component,deployment",
+                   help="Comma-separated: class, component, deployment (no LLM); sequence (LLM)")
     p.add_argument("--component-depth", type=int, help="Package depth for components (default: auto)")
     p.add_argument("--max-classes", type=int, default=60,
                    help="Above this many classes, write one class diagram per component")

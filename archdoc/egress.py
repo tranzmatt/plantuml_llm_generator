@@ -456,7 +456,7 @@ class _ViewBuilder:
             if k == "status_code" or (k in _PROTOCOL_META and v in _PROTOCOL_META[k]) or (
                     k == "component" and v.isidentifier()):     # a UI library class, e.g. Button
                 meta[k] = v
-            elif k == "used_in":
+            elif k in ("used_in", "required_in"):
                 meta[k] = [self.module_ref(x.strip()) for x in v.split(",") if x.strip()]
             elif k == "default":
                 d = self.default_text(v, mid, op.id)
