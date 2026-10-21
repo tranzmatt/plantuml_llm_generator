@@ -37,7 +37,7 @@ from .trust import CLOUD, DEFAULT_CLOUD_MODEL_PATTERNS, LOCAL, TIERS, Backend
 USER_CONFIG = os.path.join(os.path.expanduser("~"), ".config", "archdoc", "config.toml")
 REPO_CONFIG = ".archdoc.toml"
 
-LEVELS = ("none", "interfaces", "callgraph", "control_flow")
+LEVELS = ("none", "interfaces", "callgraph", "control_flow", "source")
 
 
 class PolicyError(ValueError):
@@ -46,7 +46,7 @@ class PolicyError(ValueError):
 
 @dataclass(frozen=True)
 class EgressPolicy:
-    level: str                  # none | interfaces | callgraph | control_flow
+    level: str                  # none | interfaces | callgraph | control_flow | source (a ceiling; see archdoc.packing)
     pseudonymize: str           # off | internal | all
     docstrings: str             # full | first_line | none
     interface_literals: str     # real | alias | none   (route paths, CLI flags, env names, constraints)
@@ -70,7 +70,7 @@ _CHOICES = {
 
 TIER_DEFAULTS: Dict[str, EgressPolicy] = {
     LOCAL: EgressPolicy(
-        level="control_flow", pseudonymize="off", docstrings="first_line", interface_literals="real",
+        level="source", pseudonymize="off", docstrings="first_line", interface_literals="real",
         defaults="simple_literals", members="public", on_secret="drop",
     ),
     CLOUD: EgressPolicy(
@@ -93,6 +93,8 @@ class Config:
     llm_prefer: List[str] = field(default_factory=list)
     # whether that search may pick a cloud backend; never implied
     llm_allow_cloud_fallback: bool = False
+    # how payloads are written for the model: compact "text" (default) or "json"
+    payload_encoding: str = "text"
     # [overlap]: verbatim-overlap guard on model-written text (DESIGN.md 2.5)
     overlap_mode: str = "reject"
     overlap_min_words: int = 8
@@ -197,7 +199,8 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
     cfg.cloud_model_patterns = list(trust.get("cloud_model_patterns", DEFAULT_CLOUD_MODEL_PATTERNS))
 
     for name, b in data.get("backends", {}).items():
-        unknown = set(b) - {"url", "model", "trust", "api_key_env", "kind", "num_ctx", "timeout", "keep_alive"}
+        unknown = set(b) - {"url", "model", "trust", "api_key_env", "kind", "num_ctx", "timeout", "keep_alive",
+                            "context"}
         if unknown:
             raise PolicyError(f"{src}: [backends.{name}] unknown key(s) {', '.join(sorted(unknown))}")
         if "api_key" in b:
@@ -207,7 +210,7 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
         cfg.backends[name] = Backend(name=name, **b)
 
     llm = data.get("llm", {})
-    unknown = set(llm) - {"prefer", "allow_cloud_fallback"}
+    unknown = set(llm) - {"prefer", "allow_cloud_fallback", "encoding"}
     if unknown:
         raise PolicyError(f"{src}: [llm] unknown key(s) {', '.join(sorted(unknown))}")
     cfg.llm_prefer = list(llm.get("prefer", []))
@@ -215,6 +218,9 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
     if missing:
         raise PolicyError(f"{src}: [llm] prefer names undefined backend(s): {', '.join(missing)}")
     cfg.llm_allow_cloud_fallback = bool(llm.get("allow_cloud_fallback", False))
+    cfg.payload_encoding = llm.get("encoding", "text")
+    if cfg.payload_encoding not in ("text", "json"):
+        raise PolicyError(f"{src}: [llm] encoding must be 'text' or 'json'")
 
     ov = data.get("overlap", {})
     unknown = set(ov) - {"mode", "min_words"}

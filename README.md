@@ -50,6 +50,11 @@ kind = "ollama"
 trust = "local"
 ```
 
+Requests are packed to each backend's context window (`num_ctx` for Ollama;
+for vLLM the server's `max_model_len`, or `context = N`): functions start as
+stubs and are upgraded to control-flow outlines, then full source (local models
+only), as far as the window allows. Nothing is cut mid-function.
+
 Hosts on VPN/CGNAT ranges (e.g. NetBird or Tailscale 100.x addresses) must be listed
 in `[trust] local_hosts` before they're accepted as local.
 

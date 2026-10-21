@@ -45,6 +45,7 @@ class LLMBackend:
     # skipped instead of each waiting out its own timeout (circuit breaker)
     unavailable: Optional[str] = None
     digest: Optional[str] = None       # model content digest, where the server reports one (Ollama)
+    window: Optional[int] = None       # context window in tokens, when known (archdoc.packing)
 
     def complete_json(self, system: str, user: str, schema: Dict[str, Any],
                       max_tokens: int = 2048) -> Completion:
@@ -90,6 +91,7 @@ class OllamaBackend(LLMBackend):
     def __init__(self, cfg: Backend, temperature: float = 0.0):
         self.name, self.url, self.model = cfg.name, (cfg.url or "http://localhost:11434").rstrip("/"), cfg.model
         self.num_ctx = cfg.num_ctx or 8192
+        self.window = self.num_ctx
         self.timeout = cfg.timeout
         self.temperature = temperature
         self.keep_alive = cfg.keep_alive
@@ -140,6 +142,7 @@ class OpenAICompatBackend(LLMBackend):
             raise BackendError(f"backend {cfg.name!r} needs a url")
         self.timeout = cfg.timeout
         self.temperature = temperature
+        self.window = cfg.context
         self.headers: Dict[str, str] = {}
         if cfg.api_key_env:
             key = os.environ.get(cfg.api_key_env)
@@ -153,6 +156,9 @@ class OpenAICompatBackend(LLMBackend):
         ids = [m.get("id") for m in models.get("data", [])]
         if ids and self.model not in ids:
             raise BackendError(f"{self.url} serves {', '.join(map(str, ids))}, not {self.model!r}")
+        served = next((m.get("max_model_len") for m in models.get("data", []) if m.get("id") == self.model), None)
+        if self.window is None and isinstance(served, int):
+            self.window = served                     # vLLM reports the window it was started with
 
     def complete_json(self, system, user, schema, max_tokens=2048) -> Completion:
         body = {

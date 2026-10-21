@@ -100,6 +100,6 @@ def test_cloud_payload_aliases_channels_fields_and_labels(ir):
               if re.search(rf"(?<![A-Za-z0-9_]){re.escape(w)}(?![A-Za-z0-9_])", sent)]
     assert leaked == []
     # protocol vocabulary still gets through, so the model can tell the roles apart
-    metas = [o.get("meta", {}) for i in json.loads(sent)["interfaces"] for o in i["ops"]]
+    metas = [o.get("meta", {}) for i in payload.data["interfaces"] for o in i["ops"]]
     assert {"publish", "consume"} <= {m.get("role") for m in metas}
     assert "direct" in {m.get("exchange_type") for m in metas}

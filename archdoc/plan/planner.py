@@ -27,6 +27,8 @@ from ..pseudonym import ALIAS_RE, AliasMap
 from .schemas import REF_DESCRIPTION, outline
 
 Validator = Callable[[Any], List[str]]
+# how OpenAI-compatible servers (vLLM) reject a prompt longer than their window
+_OVERFLOW_RE = re.compile(r"maximum context length|context length|too long|exceeds the model|max_model_len", re.I)
 
 
 @dataclass
@@ -50,6 +52,12 @@ class PlanResult:
     prompt_sha256: str = ""             # system prompt + instructions, i.e. the prompt version
     shown: Dict[str, List[str]] = field(default_factory=dict)   # role -> real ids in the payload
     backend: Dict[str, Optional[str]] = field(default_factory=dict)
+    levels: Dict[str, str] = field(default_factory=dict)        # item id -> stub | outline | source
+    fit: Dict[str, Any] = field(default_factory=dict)           # window, budget and size actually sent
+    # context fitting: the first request's size, for calibration; whether it overflowed
+    first_prompt_chars: int = 0
+    first_prompt_tokens: Optional[int] = None
+    overflow: bool = False
 
     @property
     def ok(self) -> bool:
@@ -71,6 +79,22 @@ def _schema_errors(obj: Any, schema: Dict[str, Any], limit: int = 8) -> List[str
     return out
 
 
+_REF_FIELDS = ("ref", "from", "to", "call")
+
+
+def _expand_short(obj: Any, short: Dict[str, str], key: str = "") -> Any:
+    """Short ids back to full ids, in reference fields only (labels keep their wording)."""
+    if not short:
+        return obj
+    if isinstance(obj, dict):
+        return {k: _expand_short(v, short, k) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_short(v, short, key) for v in obj]
+    if key in _REF_FIELDS and isinstance(obj, str):
+        return short.get(obj, obj)
+    return obj
+
+
 def payload_terms(payload: Payload, aliases: AliasMap) -> Callable[[str], str]:
     """Rewrite text in the terms the model was shown.
 
@@ -82,6 +106,7 @@ def payload_terms(payload: Payload, aliases: AliasMap) -> Callable[[str], str]:
     """
     present = sorted(set(ALIAS_RE.findall(payload.text)))
     pairs = [(aliases.resolve_ref(a), a) for a in present]
+    pairs += [(full, short) for short, full in payload.short.items()]   # local ids in their short form
     pairs = sorted(((k, a) for k, a in pairs if k), key=lambda kv: -len(kv[0]))
     if not pairs:
         return lambda text: text
@@ -108,7 +133,8 @@ def run_plan(
         + outline(schema)
     result.payload_sha256 = payload.sha256
     result.prompt_sha256 = hashlib.sha256((system + "\0" + instructions).encode()).hexdigest()
-    result.shown = {role: [aliases.resolve_ref(r) or r if ALIAS_RE.fullmatch(r) else r for r in refs]
+    result.shown = {role: [aliases.resolve_ref(r) or r if ALIAS_RE.fullmatch(r) else payload.short.get(r, r)
+                           for r in refs]
                     for role, refs in payload.allowed.items()}
     result.backend = {"name": backend.name, "model": backend.model, "url": backend.url,
                       "digest": getattr(backend, "digest", None)}
@@ -126,9 +152,20 @@ def run_plan(
             raw = completion.text
             result.prompt_tokens += completion.prompt_tokens or 0
             result.completion_tokens += completion.completion_tokens or 0
+            if attempt == 1:
+                result.first_prompt_chars = len(system) + len(user)
+                result.first_prompt_tokens = completion.prompt_tokens
+            window = getattr(backend, "window", None)
+            if window and completion.prompt_tokens and completion.prompt_tokens >= window - 8:
+                # Ollama keeps going with a silently truncated prompt: never trust that answer
+                result.overflow = True
+                result.errors = [f"the prompt filled the {window}-token window ({completion.prompt_tokens} "
+                                 f"tokens) and was truncated by the server"]
+                return result
         except BackendError as exc:
             if exc.unavailable:
                 backend.unavailable = str(exc)
+            result.overflow = bool(_OVERFLOW_RE.search(str(exc)))
             result.errors = [f"backend: {exc}"]
             if log:
                 log.record(payload, backend.name, backend.url, model=backend.model, attempt=attempt,
@@ -145,7 +182,7 @@ def run_plan(
         if obj is not None and not errors:
             ingress = accept(obj, aliases)
             errors = ingress.errors
-            restored = ingress.data
+            restored = _expand_short(ingress.data, payload.short)
         if restored is not None and not errors and validate:
             errors = validate(restored)
             if errors:

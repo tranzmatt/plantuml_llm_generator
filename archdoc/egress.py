@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .interfaces import Interface, Operation, TypeRef
+from .extract.bodies import locate, outline_text, source_text
+from .packing import encode_payload, shorten
 from .ir import EXTERNAL_PREFIX, Class, Decorator, Field, Function, Module, RepoIR
 from .policy import Config, EgressPolicy, stricter
 from .pseudonym import AliasMap
@@ -92,8 +94,11 @@ class Payload:
     data: Dict[str, Any]
     text: str
     redactions: List[Tuple[str, str]] = field(default_factory=list)   # (location, kind)
-    # refs exposed in this payload, by role; planners turn these into schema enums
+    # refs exposed in this payload, by role, as the model sees them; planners turn
+    # these into schema enums
     allowed: Dict[str, List[str]] = field(default_factory=dict)
+    # per-request short id -> full id (archdoc.packing.shorten); ingress maps back
+    short: Dict[str, str] = field(default_factory=dict)
 
     @property
     def token_estimate(self) -> int:
@@ -373,6 +378,19 @@ class _ViewBuilder:
                     out[key] = [self.symbol_ref(i, mid) for i in ids]
         return out
 
+    def body_view(self, fid: str, mid: str, level: str, root: Optional[str]) -> Optional[str]:
+        """A function's outline or source, if this request may carry it: a local
+        (unaliased) module whose policy level allows it. Secret-scanned like any leaf."""
+        need = {"outline": "control_flow", "source": "source"}.get(level)
+        if need is None or root is None or self._aliased(mid) or not self.pol(mid).level_at_least(need):
+            return None
+        found = locate(root, self.ir, fid)
+        if found is None:
+            return None
+        node, lines = found
+        text = outline_text(node) if level == "outline" else source_text(node, lines)
+        return self._emit(text, mid, fid)
+
     def class_view(self, c: Class, mid: str) -> Dict[str, Any]:
         out: Dict[str, Any] = {"ref": self.symbol_ref(c.id, mid)}
         if c.kind != "class":
@@ -513,9 +531,14 @@ def _finish(builder: _ViewBuilder, data: Dict[str, Any], tier: str, artifact: st
             allowed: Optional[Dict[str, List[str]]] = None) -> Payload:
     if builder.abort_findings:
         raise EgressAborted(builder.abort_findings)
-    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    short: Dict[str, str] = {}
+    sent = data
+    # planner requests (with `allowed` refs) use short ids; the whole-repo preview keeps full ids
+    if builder.config.payload_encoding == "text" and allowed:
+        sent, allowed, short = shorten(data, allowed)
+    text = encode_payload(sent, builder.config.payload_encoding)
     return Payload(tier=tier, artifact=artifact, data=data, text=text,
-                   redactions=builder.redactions, allowed=allowed or {})
+                   redactions=builder.redactions, allowed=allowed or {}, short=short)
 
 
 def participant_of(function_id: str) -> str:
@@ -527,8 +550,11 @@ def participant_of(function_id: str) -> str:
 def build_sequence_payload(
     ir: RepoIR, config: Config, tier: str, aliases: AliasMap,
     entry_handler: str, function_ids: List[str], via: Optional[Tuple[Interface, Operation]] = None,
+    detail: Optional[Dict[str, str]] = None, root: Optional[str] = None,
+    repo_map: Optional[List[Dict[str, Any]]] = None,
 ) -> Payload:
-    """Call-graph slice for one entry point. `function_ids` must start with the handler."""
+    """Call-graph slice for one entry point. `function_ids` must start with the handler.
+    `detail` maps function ids to outline/source (default stub); see archdoc.packing."""
     b = _ViewBuilder(ir, config, tier, aliases)
     if not b.base.level_at_least("callgraph"):
         raise EgressAborted([("policy", f"level={b.base.level} does not allow call graphs")])
@@ -550,6 +576,10 @@ def build_sequence_payload(
                          if c in in_slice or c.startswith(EXTERNAL_PREFIX)]
         if not view["calls"]:
             view.pop("calls")
+        level = (detail or {}).get(fid, "stub")
+        body = b.body_view(fid, mid, level, root)
+        if body is not None:
+            view[level] = body
         functions.append(view)
     part_views = []
     for pid in participants:
@@ -571,6 +601,8 @@ def build_sequence_payload(
         if "name" in opv:
             entry["operation"] = opv["name"]
     data = {"entry": entry, "participants": part_views, "functions": functions}
+    if repo_map:
+        data = {"system_map": repo_map, **data}
     return _finish(b, data, tier, f"sequence:{entry_handler}", {
         "participants": [pv["ref"] for pv in part_views],
         "functions": [f["ref"] for f in functions],
@@ -578,8 +610,11 @@ def build_sequence_payload(
 
 
 def build_interface_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap,
-                            iface: Interface) -> Payload:
-    """One interface, its handlers' signatures and the data types it exchanges."""
+                            iface: Interface, detail: Optional[Dict[str, str]] = None,
+                            root: Optional[str] = None,
+                            repo_map: Optional[List[Dict[str, Any]]] = None) -> Payload:
+    """One interface, its handlers' signatures and the data types it exchanges.
+    `detail` maps handler ids to outline/source (default stub)."""
     b = _ViewBuilder(ir, config, tier, aliases)
     iv = b.interface_view(iface)
     handlers, seen = [], set()
@@ -591,6 +626,10 @@ def build_interface_payload(ir: RepoIR, config: Config, tier: str, aliases: Alia
             hv = b.function_view(fn, mid, is_method=participant_of(fn.id) != mid)
             for k in ("decorators", "calls", "creates"):
                 hv.pop(k, None)
+            level = (detail or {}).get(fn.id, "stub")
+            body = b.body_view(fn.id, mid, level, root)
+            if body is not None:
+                hv[level] = body
             handlers.append(hv)
     type_ids = []
     for op in iface.operations:
@@ -604,7 +643,8 @@ def build_interface_payload(ir: RepoIR, config: Config, tier: str, aliases: Alia
             cv = b.class_view(cls, b.owner_module(tid))
             cv.pop("methods", None)
             types.append(cv)
-    data: Dict[str, Any] = {"interface": iv}
+    data: Dict[str, Any] = {"system_map": repo_map} if repo_map else {}
+    data["interface"] = iv
     if handlers:
         data["handlers"] = handlers
     if types:
@@ -614,6 +654,42 @@ def build_interface_payload(ir: RepoIR, config: Config, tier: str, aliases: Alia
         "operations": [o["ref"] for o in iv["ops"]],
         "params": params,
     })
+
+
+def build_repo_map(ir: RepoIR, config: Config, tier: str, aliases: AliasMap,
+                   cap_chars: int) -> List[Dict[str, Any]]:
+    """Ranked outline of the whole system, the same in every request of a run
+    (DESIGN.md 12.4): modules by how many others import them and how many
+    interfaces they own, each with its docstring line (as policy allows) and
+    the kinds of interface it provides or uses. Cut at `cap_chars` encoded."""
+    b = _ViewBuilder(ir, config, tier, aliases)
+    if not b.base.level_at_least("interfaces"):
+        return []
+    importers: Dict[str, int] = {}
+    for m in ir.modules:
+        for imp in m.imports:
+            importers[imp] = importers.get(imp, 0) + 1
+    owned: Dict[str, List[Interface]] = {}
+    for iface in ir.interfaces:
+        owned.setdefault(iface.owner, []).append(iface)
+    ranked = sorted(ir.modules, key=lambda m: (-(importers.get(m.id, 0) + 2 * len(owned.get(m.id, []))), m.id))
+    out: List[Dict[str, Any]] = []
+    for m in ranked:
+        if m.parse_error:
+            continue
+        entry: Dict[str, Any] = {"ref": b.module_ref(m.id)}
+        doc = b.prose((m.docstring or "").split("\n", 1)[0] or None, m.id, m.id)
+        if doc:
+            entry["doc"] = doc
+        kinds = sorted({f"{i.kind} {i.direction}" for i in owned.get(m.id, [])})
+        if kinds:
+            entry["interfaces"] = kinds
+        if len(encode_payload({"system_map": out + [entry]}, "text")) > cap_chars:
+            break
+        out.append(entry)
+    if b.abort_findings:
+        return []
+    return out
 
 
 def build_payload(

@@ -7,18 +7,21 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ..backends import LLMBackend
-from ..egress import EgressLog, build_interface_payload, build_sequence_payload
+from ..egress import EgressLog, build_interface_payload, build_repo_map, build_sequence_payload
 from ..interfaces import Interface
 from ..ir import RepoIR
 from ..policy import Config
 from ..pseudonym import ALIAS_RE, AliasMap
 from .. import overlap as overlap_guard
 from ..overlap import SourceIndex
+from ..packing import (
+    DEFAULT_WINDOW, Calibration, Packed, Window, allowed_levels, levels_summary, pack, shrink_steps,
+)
 from . import prompts
 from .entries import Entry, call_slice
 from .planner import PlanResult, run_plan
 from .verify import prune_sequence, verify_sequence
-from .schemas import CLIENT, narrative_schema, sequence_schema
+from .schemas import CLIENT, narrative_schema, outline, sequence_schema
 
 
 @dataclass
@@ -33,6 +36,13 @@ class PlanContext:
     max_nodes: int = 25
     alias_path: Optional[str] = None     # where the alias map is persisted after the run
     overlap: Optional[SourceIndex] = None   # verbatim-overlap guard (None: not checked)
+    # context fitting (archdoc.packing): repo root for outline/source, the window
+    # (default: the backend's, else 8k), measured chars per token, the shared repo map
+    root: Optional[str] = None
+    window: Optional[Window] = None
+    calibration: Optional[Calibration] = None
+    repo_map: Optional[List[Dict[str, Any]]] = None
+    map_share: float = 0.15
 
 
 def dedupe_participants(plan: Any) -> None:
@@ -151,11 +161,82 @@ def correct_misspelled_names(ir: RepoIR, plan: Any, ids: List[str]) -> List[str]
     return [f"corrected misspelled name {w!r} -> {n!r}" for w, n in sorted(fixed.items())]
 
 
+# -- context fitting -----------------------------------------------------------------------
+
+MAX_TOKENS = 2048          # the answer budget passed to run_plan
+
+
+def _window(ctx: PlanContext) -> Window:
+    w = ctx.window or Window(tokens=getattr(ctx.backend, "window", None) or DEFAULT_WINDOW)
+    cpt = ctx.calibration.get(ctx.backend.model) if ctx.calibration else w.chars_per_token
+    return Window(w.tokens, MAX_TOKENS, cpt)
+
+
+def _budget(ctx: PlanContext, system: str, instructions: str, schema: Dict[str, Any]) -> int:
+    fixed = len(system) + len(outline(schema)) + 120 + len(instructions)
+    return _window(ctx).input_chars(fixed)
+
+
+def _repo_map(ctx: PlanContext) -> List[Dict[str, Any]]:
+    """Built once per run, so every request carries the identical map (prefix caching)."""
+    if ctx.repo_map is None:
+        cap = int(_window(ctx).input_chars(0) * ctx.map_share)   # a share of what payloads can use
+        ctx.repo_map = build_repo_map(ctx.ir, ctx.config, ctx.tier, ctx.aliases, cap)
+    return ctx.repo_map
+
+
+def _calibrate(ctx: PlanContext, result: PlanResult) -> None:
+    if ctx.calibration is not None:
+        ctx.calibration.observe(ctx.backend.model, result.first_prompt_chars, result.first_prompt_tokens)
+
+
+def _fit(packed: Packed, ctx: PlanContext) -> Dict[str, Any]:
+    w = _window(ctx)
+    return {"window_tokens": w.tokens, "chars_per_token": w.chars_per_token, "budget_chars": packed.budget_chars,
+            "payload_chars": len(packed.payload.text), "fits": packed.fits,
+            "levels": levels_summary(packed.levels)}
+
+
 def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
-    """Plan, verify against the call graph, repair once, then prune what still fails."""
+    """Pack the slice into the window, plan, verify against the call graph, repair
+    once, then prune what still fails."""
+    policy = ctx.config.policy_for(ctx.tier)
+    repo_map = _repo_map(ctx)
+
+    def build_for(slice_ids: List[str], with_map: bool = True):
+        return lambda detail: build_sequence_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, entry.handler,
+                                                     slice_ids, entry.via, detail=detail, root=ctx.root,
+                                                     repo_map=repo_map if with_map else None)
+
     ids = call_slice(ctx.ir, entry.handler, ctx.depth, ctx.max_nodes)
-    payload = build_sequence_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, entry.handler, ids, entry.via)
-    schema = sequence_schema(payload.allowed["participants"], payload.allowed["functions"])
+    stub = build_for(ids)({})
+    schema = sequence_schema(stub.allowed["participants"], stub.allowed["functions"])
+    system, instructions = prompts.sequence_prompts(bool(ALIAS_RE.search(stub.text)))
+    notes: List[str] = []
+
+    def fit(budget: int):
+        nonlocal ids
+        packed = pack(build_for(ids), ids, allowed_levels(policy), budget)
+        if not packed.fits and repo_map:
+            trial = pack(build_for(ids, False), ids, allowed_levels(policy), budget)
+            if trial.fits:
+                notes.append("repo map left out to fit the window")
+                return trial
+        if not packed.fits:
+            full = len(ids)
+            for n in shrink_steps(full):
+                smaller = call_slice(ctx.ir, entry.handler, ctx.depth, n)
+                trial = pack(build_for(smaller, False), smaller, allowed_levels(policy), budget)
+                if trial.fits:
+                    ids, packed = smaller, trial
+                    notes.append(f"slice reduced from {full} to {len(ids)} functions to fit the window")
+                    break
+            else:
+                if full > 2:                      # send the smallest attempt, not the original
+                    ids = call_slice(ctx.ir, entry.handler, ctx.depth, 2)
+                    packed = pack(build_for(ids, False), ids, [], budget)
+                notes.append(f"the slice does not fit the window even at {len(ids)} functions; sent as stubs")
+        return packed
 
     def validate(plan: Any) -> List[str]:
         structural = check_sequence(plan)
@@ -165,8 +246,19 @@ def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
         return [str(x) for x in verify_sequence(ctx.ir, plan, ids, entry.handler)] + \
             overlap_guard.errors(ctx.overlap, overlap_guard.sequence_texts(plan))
 
-    system, instructions = prompts.sequence_prompts(bool(ALIAS_RE.search(payload.text)))
-    result = run_plan(ctx.backend, payload, schema, system, instructions, ctx.aliases, validate=validate, log=ctx.log)
+    budget = _budget(ctx, system, instructions, schema)
+    packed = fit(budget)
+    result = run_plan(ctx.backend, packed.payload, schema, system, instructions, ctx.aliases,
+                      validate=validate, log=ctx.log, max_tokens=MAX_TOKENS)
+    if result.overflow:
+        _calibrate(ctx, result)
+        notes.append("the prompt overflowed the window; repacked smaller and retried")
+        packed = fit(min(int(budget * 0.6), _budget(ctx, system, instructions, schema)))
+        result = run_plan(ctx.backend, packed.payload, schema, system, instructions, ctx.aliases,
+                          validate=validate, log=ctx.log, max_tokens=MAX_TOKENS)
+    _calibrate(ctx, result)
+    result.levels, result.fit = packed.levels, _fit(packed, ctx)
+    result.warnings = notes + result.warnings
     passed_unaided = result.ok          # every check passed without pruning (maybe after a repair)
     if not result.ok and result.candidate is not None and not check_sequence(result.candidate):
         # still failing verification after repair: keep what verifies, drop the rest
@@ -203,15 +295,36 @@ def check_narrative(plan: Any) -> List[str]:
 
 
 def plan_narrative(ctx: PlanContext, iface: Interface) -> PlanResult:
-    payload = build_interface_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, iface)
-    schema = narrative_schema(payload.allowed["operations"], payload.allowed["params"])
-    system, instructions = prompts.narrative_prompts(bool(ALIAS_RE.search(payload.text)))
+    policy = ctx.config.policy_for(ctx.tier)
+    repo_map = _repo_map(ctx)
+    handlers = list(dict.fromkeys(op.handler for op in iface.operations if op.handler))
+
+    def build(detail: Dict[str, str]):
+        return build_interface_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, iface, detail=detail,
+                                       root=ctx.root, repo_map=repo_map)
+
+    stub = build({})
+    schema = narrative_schema(stub.allowed["operations"], stub.allowed["params"])
+    system, instructions = prompts.narrative_prompts(bool(ALIAS_RE.search(stub.text)))
 
     def validate(plan: Any) -> List[str]:
         return check_narrative(plan) + overlap_guard.errors(ctx.overlap, overlap_guard.narrative_texts(plan))
 
-    result = run_plan(ctx.backend, payload, schema, system, instructions, ctx.aliases,
-                      validate=validate, log=ctx.log)
+    budget = _budget(ctx, system, instructions, schema)
+    packed = pack(build, handlers, allowed_levels(policy), budget)
+    notes = [] if packed.fits else ["the interface does not fit the window even as stubs; sent anyway"]
+    result = run_plan(ctx.backend, packed.payload, schema, system, instructions, ctx.aliases,
+                      validate=validate, log=ctx.log, max_tokens=MAX_TOKENS)
+    if result.overflow:
+        _calibrate(ctx, result)
+        notes.append("the prompt overflowed the window; repacked smaller and retried")
+        packed = pack(build, handlers, allowed_levels(policy), min(int(budget * 0.6),
+                                                                 _budget(ctx, system, instructions, schema)))
+        result = run_plan(ctx.backend, packed.payload, schema, system, instructions, ctx.aliases,
+                          validate=validate, log=ctx.log, max_tokens=MAX_TOKENS)
+    _calibrate(ctx, result)
+    result.levels, result.fit = packed.levels, _fit(packed, ctx)
+    result.warnings = notes + result.warnings
     if not result.ok and result.candidate is not None and not check_narrative(result.candidate):
         # only the overlap check failed after repair: keep the rest, clear what overlaps
         result.plan, result.raw, result.errors = result.candidate, result.candidate_raw, []

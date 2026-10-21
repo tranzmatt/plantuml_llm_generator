@@ -85,6 +85,8 @@ def request_record(result, ctx=None) -> Dict[str, Any]:
         "shown": result.shown,
         "attempts": result.attempts,
         "ok": result.ok,
+        "fit": result.fit,
+        "levels": result.levels,
         "prompt_tokens": result.prompt_tokens or None,
         "completion_tokens": result.completion_tokens or None,
         "warnings": result.warnings,
@@ -141,6 +143,9 @@ def sequence_items(ir: RepoIR, result, slice_ids: List[str], entry: Optional[str
             evidence = [entry]                       # the entry invocation, written without "call"
         item = {"id": f"message[{i}]", "class": "derived", "verified": True, "from": m["from"], "to": m["to"],
                 "call": call or None, "evidence": evidence, "request": 0}
+        levels = getattr(result, "levels", None) or {}
+        if call and call in levels:
+            item["detail"] = levels[call]            # how much of the callee the model was shown
         if not m.get("reply"):
             calls_so_far.append(item)
         if m.get("label"):

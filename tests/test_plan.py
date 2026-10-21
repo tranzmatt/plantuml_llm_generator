@@ -46,9 +46,38 @@ def _enum(schema, *path):
     return node["enum"]
 
 
+_DEF = re.compile(r"^\s*(?:async\s+)?def\s+([^\s(]+)\(.*?:(?:\s+#\s+(.*))?$")
+_SOURCE_HEAD = re.compile(r"^\s*#\s+([^\s;]+);\s+(owner .*)$")
+
+
+def _notes(text):
+    out = {}
+    for part in (text or "").split("; "):
+        key, _, value = part.partition(" ")
+        if key in ("owner", "calls", "creates", "raises"):
+            out[key] = value if key == "owner" else value.split(", ")
+    return out
+
+
 def payload_of(user):
-    """The JSON payload inside a planner prompt (repair rounds append text after it)."""
-    return json.loads(user.split("INPUT:\n", 1)[1].split("\n\nYOUR PREVIOUS ANSWER")[0])
+    """The sequence payload inside a planner prompt, read back from the text encoding
+    (JSON when [llm] encoding = "json"). Repair rounds append text after it."""
+    body = user.split("INPUT:\n", 1)[1].split("\n\nYOUR PREVIOUS ANSWER")[0]
+    if body.lstrip().startswith("{"):
+        return json.loads(body)
+    handler = re.search(r"\bhandler[=:] ?([^\s,]+)", body).group(1)
+    functions, in_source = [], False
+    for line in body.split("functions:\n", 1)[1].splitlines():
+        head = _SOURCE_HEAD.match(line)
+        if head:
+            functions.append({"ref": head.group(1), **_notes(head.group(2))})
+            in_source = True                       # the function's own source follows
+            continue
+        m = _DEF.match(line) if line.startswith(("  def ", "  async def ")) else None
+        if m and not (in_source and not m.group(2)):
+            functions.append({"ref": m.group(1), **_notes(m.group(2))})
+            in_source = False
+    return {"entry": {"handler": handler}, "functions": functions}
 
 
 def sequence_responder(system, user, schema):

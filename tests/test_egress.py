@@ -160,7 +160,7 @@ def test_level_none_sends_nothing(ir):
 def test_members_public_hides_protected(ir):
     public = _payload(ir, "local").text
     everything = _payload(ir, "local", _with_policy("local", members="all")).text
-    assert '"_cache"' not in public and '"_cache"' in everything
+    assert not re.search(r"\b_cache\b", public) and re.search(r"\b_cache\b", everything)
 
 
 def test_scope_limits_modules(ir):

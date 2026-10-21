@@ -753,6 +753,49 @@ must be a real import or call edge). They are cached by content hash (module
 source hash + model + prompt version), so a rerun only re-summarizes modules
 that changed.
 
+### 12.6 Implementation status (4a)
+
+Implemented in `archdoc.packing`, `archdoc.extract.bodies` and the planners:
+
+- **Encoding:** `[llm] encoding = "text"` (default) or `"json"`. Functions are
+  Python stubs; everything else is `key: value` lines with flat dicts and
+  scalar lists inline. The JSON (`Payload.data`) stays the audited form.
+- **Short ids:** in each planner request, every internal id in a reference field
+  becomes its shortest unique suffix (`archdoc.cli:cmd_eval` → `cmd_eval`),
+  including the schema enums. Ingress maps them back in `ref`/`from`/`to`/`call`
+  fields, and repair messages are rewritten into the short forms. Aliases and `ext:`
+  ids are left alone. The whole-repo dry-run preview keeps full ids.
+- **Levels:** stub, outline (control flow, calls as written, raised types, no
+  expressions; builtins dropped) and source (decorators included). Bodies
+  come only from local, unaliased modules whose policy reaches `control_flow` or
+  `source`, and every body passes the secret scanner. The local default level is
+  now `source`, as designed.
+- **Budget:** window from `num_ctx` (Ollama), `context` or vLLM's reported
+  `max_model_len`, else 8k. Reserved: prompt, answer, the answer echoed in a
+  repair, and a 10% margin. Characters per token start at 3.0 and are lowered
+  to the lowest ratio measured per model (`.archdoc/calibration.json`).
+- **Packing:** stubs first, then outline for every item in rank order (call-graph
+  order), then source, each kept only if it fits. If not even the stubs fit, the
+  repo map is dropped, then the slice is shrunk (25 → 16 → 10 ...), and finally
+  the 2-function minimum is sent with a warning. An overflow (Ollama: prompt
+  tokens reach `num_ctx`, which it would silently truncate; vLLM: a context-length
+  error) recalibrates, repacks at ≤60% and retries once. Levels and the fit are
+  recorded per request in the provenance sidecar, and per message as `detail`.
+- **Repo map:** modules ranked by importers + 2 × interfaces owned, each with its
+  docstring line and interface kinds, capped at 15% of the payload budget. Placed
+  first in every payload, so it is identical across a run, logged, and covered by
+  the leak tests.
+
+Measured (mistral-nemo tokenizer, this repo's four largest slices and four interfaces,
+local and cloud, stub level, same facts): local sequence payloads are **27–36%
+smaller** than JSON, cloud ones about 10% (aliases are already short), and
+narratives 11–16% locally. All 15 sequence entries and 14
+narratives of this repo fit an 8k window with no truncation, carrying 59 functions
+as source and 29 as outlines; at 32k every function is sent as source.
+
+Found on the way: the secret scanner's AWS-key pattern required a word boundary,
+so a key glued to more characters (`"AKIA...J"[:20]`) passed. It no longer does.
+
 ## 13. Harness integration
 
 ### 13.1 Core idea
