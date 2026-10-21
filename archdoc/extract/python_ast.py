@@ -755,6 +755,45 @@ def _function_env(res: Resolver, pm: ParsedModule, fnode: _FuncNode) -> Dict[str
     return env
 
 
+_CATCH_ALL = frozenset({"Exception", "BaseException"})
+
+
+def _handler_types(res: Resolver, pm, handler: ast.ExceptHandler) -> Set[str]:
+    """What an except clause stops: none if it re-raises (a bare `raise`), else
+    its types ("*" for a bare except or Exception). A handler that raises
+    another exception has translated it; that one is in `raises` already."""
+    if any(isinstance(n, ast.Raise) and n.exc is None for n in _walk_no_nested_scopes(handler.body)):
+        return set()
+    if handler.type is None:
+        return {"*"}
+    out: Set[str] = set()
+    for t in (handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]):
+        dn = dotted_name(t)
+        if not dn:
+            continue
+        rid = res.resolve_name(pm, dn)
+        if rid and (rid in res.classes or rid.startswith(EXTERNAL_PREFIX)):
+            out.add(rid)
+        elif dn in _CATCH_ALL:
+            out.add("*")
+        elif dn in _BUILTIN_EXCEPTIONS:
+            out.add(dn)
+    return out
+
+
+def _guards(res: Resolver, pm, body: List[ast.stmt]) -> Dict[int, Set[str]]:
+    """id(call node) -> exception types caught around it (try bodies only)."""
+    guards: Dict[int, Set[str]] = {}
+    for n in _walk_no_nested_scopes(body):
+        if isinstance(n, (ast.Try, getattr(ast, "TryStar", ast.Try))) and n.handlers:
+            types = set().union(*(_handler_types(res, pm, h) for h in n.handlers))
+            if types:
+                for c in _walk_no_nested_scopes(n.body):
+                    if isinstance(c, ast.Call):
+                        guards.setdefault(id(c), set()).update(types)
+    return guards
+
+
 def _resolve_bodies(res: Resolver) -> None:
     for pm in res.modules.values():
         for fnode in pm.funcs:
@@ -763,11 +802,14 @@ def _resolve_bodies(res: Resolver) -> None:
             # need it); raises are a set
             ordered: List[Tuple[int, int, str, str]] = []
             raises: Set[str] = set()
+            guards = _guards(res, pm, fnode.node.body)
+            sites: Dict[str, List[Set[str]]] = {}
             for n in _walk_no_nested_scopes(fnode.node.body):
                 if isinstance(n, ast.Call):
                     target = _resolve_callable(res, pm, n.func, env, fnode.class_id)
                     if target is None:
                         continue
+                    sites.setdefault(target, []).append(guards.get(id(n), set()))
                     if target in res.classes:
                         ordered.append((n.lineno, n.col_offset, "create", target))
                     elif target != fnode.fn.id:
@@ -789,6 +831,7 @@ def _resolve_bodies(res: Resolver) -> None:
                     fnode.fn.call_lines.setdefault(t, line)
             fnode.fn.creates = list(dict.fromkeys(t for _, _, k, t in ordered if k == "create"))
             fnode.fn.raises = sorted(raises)
+            fnode.fn.caught = {t: sorted(set.intersection(*g)) for t, g in sites.items() if set.intersection(*g)}
 
 
 # ===========================================================================

@@ -65,6 +65,9 @@ class Function:
     call_lines: Dict[str, int] = field(default_factory=dict)   # call target -> line of its first call
     creates: List[str] = field(default_factory=list)   # class ids instantiated, source order
     raises: List[str] = field(default_factory=list)    # class ids, ext:..., or builtin names
+    # call target -> exception types caught around every call to it ("*": all);
+    # what a callee raises there does not reach this function's caller
+    caught: Dict[str, List[str]] = field(default_factory=dict)
 
 
 @dataclass

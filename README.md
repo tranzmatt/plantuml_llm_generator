@@ -97,6 +97,27 @@ start small. Model answers are cached in `archdoc_out/.archdoc/cache/`: a rerun
 with no code change sends nothing, and after a change only the affected
 requests are sent again (`--no-cache` to ask again anyway).
 
+**Coding agents (opencode, Mistral Vibe).** The agent can act as the model.
+`archdoc serve-mcp` is an MCP server that hands it the exact requests a model
+would get (pseudonymized under `--trust cloud`) and checks its answers the same
+way. The agent never reads the repo:
+
+```bash
+archdoc harness-init ~/archdoc-agent --harness opencode --repo ~/Code/YourProject \
+  --out ~/archdoc_out --trust local --model MODEL     # or --harness vibe
+~/archdoc-agent/run-opencode.sh                               # headless, or run-vibe.sh
+```
+
+The directory gets `AGENTS.md` and a profile in which archdoc's five tools are
+the only tools: no file, shell or web access. A `local` profile can use only
+its one local model (Ollama's `/v1` by default, `--url` otherwise; give the
+model a 16k window or more, e.g. an Ollama variant with `num_ctx 16384`, and
+pass `--context` if it differs). A `cloud` profile uses the harness's own
+provider setup (opencode: `--model provider/model`), and the agent sees only aliases. Set
+`PLANTUML_JAR` before `harness-init` to have diagrams checked and rendered.
+Answers are kept in the output directory, so a stopped run resumes, and after
+a code change only the affected requests come back. See DESIGN.md §13.
+
 `archdoc eval REPO --spec eval/<name>.toml --backend a,b,c` compares the
 extracted architecture with a reference diagram and the backends with each other
 (see `eval/celebrity-rec-rabbitmq.toml`).

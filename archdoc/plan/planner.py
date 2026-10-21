@@ -14,6 +14,7 @@ replayed from disk: nothing is sent, and the log records it as cached.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import re
@@ -62,6 +63,7 @@ class PlanResult:
     first_prompt_tokens: Optional[int] = None
     overflow: bool = False
     cached: int = 0                     # attempts answered from the response cache
+    pending: bool = False               # a deferred backend has no answer for this request yet
 
     @property
     def ok(self) -> bool:
@@ -134,6 +136,15 @@ def run_plan(
 ) -> PlanResult:
     result = PlanResult(payload.artifact, payload_aliased=bool(ALIAS_RE.search(payload.text)))
     to_payload_terms = payload_terms(payload, aliases)
+    deferred = getattr(backend, "deferred", False)
+    if deferred:
+        # answers come later, from a harness agent (archdoc.harness): it resubmits
+        # to the same request instead of getting a repair round, and resubmitting
+        # runs this same call again
+        backend.begin(payload, functools.partial(
+            run_plan, backend, payload, schema, system, instructions, aliases, validate=validate, log=log,
+            repairs=repairs, max_tokens=max_tokens, cache=cache), to_payload_terms)
+        repairs = 0
     system = system + "\n\nRESPONSE FORMAT: one JSON object with exactly these keys, all required:\n" \
         + outline(schema)
     result.payload_sha256 = payload.sha256
@@ -181,6 +192,7 @@ def run_plan(
                 backend.unavailable = str(exc)
             result.overflow = bool(_OVERFLOW_RE.search(str(exc)))
             result.errors = [f"backend: {exc}"]
+            result.pending = exc.pending
             if log:
                 log.record(payload, backend.name, backend.url, model=backend.model, attempt=attempt,
                            ok=False, errors=result.errors)
@@ -202,6 +214,8 @@ def run_plan(
             if errors:
                 result.candidate, result.candidate_raw = restored, obj
 
+        if deferred:
+            backend.verdict([to_payload_terms(e) for e in errors])
         if log:
             log.record(payload, backend.name, backend.url, model=backend.model, attempt=attempt,
                        ok=not errors, errors=errors,

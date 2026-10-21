@@ -716,6 +716,30 @@ def _with_map(data: Dict[str, Any], repo_map: Optional[List[Dict[str, Any]]]) ->
     return {"system_map": repo_map, **data} if repo_map else data
 
 
+def _caught(ir: RepoIR, exc: str, caught: Iterable[str]) -> bool:
+    """Whether an except clause for one of `caught` stops `exc`: the same type,
+    a builtin base class of a builtin, or a base class in the repo's hierarchy."""
+    caught = set(caught)
+    if not caught:
+        return False
+    if "*" in caught or exc in caught:
+        return True
+    bexc = getattr(builtins, exc, None)
+    if isinstance(bexc, type) and any(isinstance(getattr(builtins, c, None), type)
+                                      and issubclass(bexc, getattr(builtins, c)) for c in caught):
+        return True
+    seen, todo = set(), [exc]
+    while todo:
+        cls = ir.find_class(todo.pop())
+        if cls is None or cls.id in seen:
+            continue
+        seen.add(cls.id)
+        if any(b in caught for b in cls.bases):
+            return True
+        todo += cls.bases
+    return False
+
+
 def build_function_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap, function_id: str,
                            detail: Optional[Dict[str, str]] = None, root: Optional[str] = None,
                            repo_map: Optional[List[Dict[str, Any]]] = None) -> Payload:
@@ -741,7 +765,7 @@ def build_function_payload(ir: RepoIR, config: Config, tier: str, aliases: Alias
         for k in ("decorators", "calls", "creates"):
             cv.pop(k, None)
         views.append(cv)
-        raises += [r for r in callee.raises if r not in raises]
+        raises += [r for r in callee.raises if r not in raises and not _caught(ir, r, fn.caught.get(cid, ()))]
     data: Dict[str, Any] = {"target": target["ref"]}
     cls = ir.find_class(owner) if owner != mid else None
     if cls is not None:

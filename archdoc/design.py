@@ -209,10 +209,15 @@ def build_design_context(ir: RepoIR, ir_all: RepoIR, root: str, llm: Optional[Pl
 
     # -- summaries, bottom up -------------------------------------------------------
     raw: Dict[str, str] = {}
+    # summaries a harness agent has not answered yet (archdoc.harness): the level
+    # above waits for them instead of being asked from the parts already there
+    waiting: set = set()
     if llm is not None and opts.summaries:
         for mid, mod in mods.items():
             res = plan_module_summary(llm, mid)
             record(f"summary:{mid}", res)
+            if res.pending:
+                waiting.add(mid)
             if res.ok:
                 mod["summary"], raw[mid] = res.plan, _summary_text(res)
                 say(f"summary of {mid}: ok ({_how(res)})")
@@ -221,7 +226,9 @@ def build_design_context(ir: RepoIR, ir_all: RepoIR, root: str, llm: Optional[Pl
         pkgs = packages(ir)
         for pkg, members in pkgs.items():
             entry = {"id": pkg, "anchor": anchor(f"pkg:{pkg}"), "modules": members, "summary": None}
-            if len(members) == 1:
+            if len(members) == 1 and members[0] in waiting:
+                waiting.add(f"pkg:{pkg}")
+            elif len(members) == 1:
                 entry["summary"] = mods[members[0]]["summary"] and {
                     "responsibility": mods[members[0]]["summary"]["responsibility"], "parts": [],
                     "collaborators": [], "external": mods[members[0]]["summary"]["external"], "same_as": members[0]}
@@ -231,9 +238,13 @@ def build_design_context(ir: RepoIR, ir_all: RepoIR, root: str, llm: Optional[Pl
                 collab = sorted({package_of(c, ir.module(c).path) for mid in members
                                  for c in module_collaborators(ir, mid)} - {pkg})
                 external = sorted({e for mid in members for e in module_externals(ir, mid)})
-                if parts:
+                if waiting & set(members):
+                    waiting.add(f"pkg:{pkg}")
+                elif parts:
                     res = plan_group_summary(llm, pkg, parts, collab, external)
                     record(f"summary:{pkg}", res)
+                    if res.pending:
+                        waiting.add(f"pkg:{pkg}")
                     if res.ok:
                         entry["summary"], raw[f"pkg:{pkg}"] = res.plan, _summary_text(res)
                         say(f"summary of package {pkg}: ok ({_how(res)})")
@@ -241,7 +252,9 @@ def build_design_context(ir: RepoIR, ir_all: RepoIR, root: str, llm: Optional[Pl
                         say(f"[FAIL] summary of package {pkg}: {'; '.join(res.errors[:2])}")
             ctx["packages"].append(entry)
         parts = [(pkg, raw[f"pkg:{pkg}"]) for pkg in pkgs if raw.get(f"pkg:{pkg}")]
-        if len(parts) > 1:
+        if any(w.startswith("pkg:") for w in waiting):
+            pass
+        elif len(parts) > 1:
             external = sorted({e for m in documented_modules(ir) for e in module_externals(ir, m.id)})
             res = plan_group_summary(llm, "", parts, [], external)
             record("summary:<system>", res)

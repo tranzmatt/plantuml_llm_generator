@@ -20,11 +20,13 @@ from ..trust import Backend
 
 class BackendError(Exception):
     """`unavailable`: the server could not be reached or did not answer in time
-    (as opposed to rejecting this particular request). Trips the circuit breaker."""
+    (as opposed to rejecting this particular request). Trips the circuit breaker.
+    `pending`: a deferred backend (archdoc.harness) has no answer yet."""
 
-    def __init__(self, message: str, unavailable: bool = False):
+    def __init__(self, message: str, unavailable: bool = False, pending: bool = False):
         super().__init__(message)
         self.unavailable = unavailable
+        self.pending = pending
 
 
 @dataclass

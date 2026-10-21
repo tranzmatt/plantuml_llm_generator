@@ -964,68 +964,146 @@ and document the rule "switch profile, not model".
 ### 13.3 MCP tools
 
 Repo root, policy, output directory and tier are fixed at launch, never passed as
-tool arguments.
+tool arguments. They travel in the server's environment (`ARCHDOC_REPO`,
+`ARCHDOC_OUT`, `ARCHDOC_TRUST`, `ARCHDOC_WINDOW`, `ARCHDOC_CONFIG`) rather than on
+its command line, because Vibe echoes the command line into every tool result and
+the repo path would tell a cloud model the repo's name.
+
+**The agent is the model.** Rather than one submit tool per artifact, the server
+runs the ordinary pipeline with a *deferred* backend (`archdoc/harness.py`). Every
+request the pipeline would send a model becomes a task, and the agent answers it.
+So the agent is shown exactly what a model of the launch tier would be sent
+(pseudonymized under `cloud`), and its answers go through exactly the checks a
+model's do: schema with ref enums, ingress, verification against the call graph,
+the overlap guard. Nothing about validation is duplicated per tool.
 
 | Tool | Returns |
 |------|---------|
-| `repo_overview()` | package tree, counts, entrypoints |
-| `list_interfaces(kind?, direction?)` | interface inventory |
-| `get_interfaces(module_id)` | sanitized IR for one module |
-| `get_interface(interface_id)` | operations + data types for one interface |
-| `get_call_graph(entry_id, depth=3)` | call edges (level ≥ `callgraph`) |
-| `get_control_flow(function_id)` | skeleton (level = `control_flow` only) |
-| `render_deterministic(kind)` | writes class/component diagrams and ICD tables; returns status |
-| `submit_diagram_plan(type, plan_json)` | validates, restores, renders, syntax-checks, writes; returns errors or OK |
-| `submit_icd_narrative(scope_id, narrative_json)` | validates, restores, merges, writes; returns errors or OK |
-| `check_drift()` | drift report |
+| `overview()` | the shared system map (egress view), sizes, tier, task counts by kind and status |
+| `list_tasks(kind?, status?, limit?)` | task ids, kinds and status (`open`, `rejected`, `accepted`); under `local` also what each is about |
+| `get_task(id)` | the request: instructions, input (the payload), answer schema, and the reasons a previous answer was rejected |
+| `submit_task(id, answer)` | `accepted`, or `rejected` with the reasons in the payload's own terms |
+| `write_outputs(export?)` | renders every diagram and document; counts only under `cloud` (file names carry real names) |
 
-All responses pass through `egress`, and all submissions through `ingress`.
-In `cloud` mode the agent never sees real names: `submit_*` tools return validation
-results only, not the rendered files.
+A task's id is its request key (`archdoc.cache.request_key`). An answer is stored
+under that key in `<out>/.archdoc/harness/answers/` and the request is run again,
+so the verdict is the one a model's answer would get. There is no repair round:
+the agent resubmits to the same id with the reasons in hand. Answers survive a
+server restart, and after a code change only the tasks whose input changed are
+open again. Requests that depend on other answers (package and system summaries)
+appear once the summaries below them are accepted. Each task fetched and each
+answer is recorded in the egress log (`event: shown | answered`).
 
-### 13.4 Harness configuration sketches
+`get_call_graph`, `get_control_flow` and per-module views are not tools: each
+task's input already holds what its answer may use, and every extra tool is one
+more thing a small model can misuse. `check_drift` arrives with Phase 6.
 
-> Sketches only. Config keys for both harnesses change between releases and must be
-> checked against current docs in Phase 5.
+### 13.4 Harness profiles
 
-**opencode** (`opencode.json`, local profile):
+`archdoc harness-init DIR --harness opencode|vibe --repo R --out O --trust local|cloud --model M`
+writes a working directory, which must not be inside the target repo. Checked
+against opencode 2.0.29 and Vibe 2.24.5.
 
-```jsonc
-{
-  "provider": { /* OpenAI-compatible entry for local vLLM / Ollama */ },
-  "mcp": {
-    "archdoc": {
-      "type": "local",
-      "command": ["archdoc", "serve-mcp", "--repo", "/path/to/target",
-                  "--out", "docs_out", "--trust", "local"]
-    }
-  },
-  "agent": {
-    "archdoc-local": {
-      "model": "local/<model>",
-      "prompt": "{file:./harness/AGENTS.md}",
-      "tools": { "read": false, "grep": false, "glob": false, "list": false,
-                 "bash": false, "edit": false, "write": false,
-                 "webfetch": false, "archdoc_*": true }
-    }
-  }
-}
-```
+**opencode** (`DIR/opencode.json`, 2.x native keys; the 1.x keys still load but are
+deprecated):
 
-**Mistral Vibe** (`config.toml`): register the same stdio MCP server, define the two
-profiles with built-in file, shell and web tools disabled and the `archdoc` MCP tools
-enabled.
+- `permissions`: deny `*`, then allow `archdoc_*` (last match wins), for the
+  `archdoc-<tier>` agent and the built-in `build` and `plan` agents. The model is
+  then offered the five archdoc tools and nothing else (verified by capturing
+  the request at a fake OpenAI-compatible server).
+- `mcp.servers.archdoc.codemode = false`. By default opencode 2 exposes MCP tools
+  only through an `execute` tool that runs JavaScript with `fetch`, which is also a
+  way to send data anywhere.
+- `local`: one provider (`archdoc-local`, OpenAI-compatible, default Ollama's
+  `/v1`), and `policies` deny `provider.use` for every other provider, so another
+  model cannot be picked mid-session. `opencode models` lists only that model.
+- `share: disabled`, `update: disable`; the agent prompt (AGENTS.md) is inlined
+  as the agent's `system`.
+- **Run it standalone, never through the shared background service**, which does
+  not load the directory's config (it listed every cloud model and no MCP server).
+- MCP tools attach to a session from its **second** step: the first request of a
+  session never has them, and a model that answers that step in text ends a
+  headless `run`. `DIR/run-opencode.sh` starts a private `opencode serve` for the
+  directory (one-off password in the environment), opens a session with a first
+  message, then continues it with the task. Interactively, send a second message.
+- `limit.output` is set (half the window, at most 8192): a thinking model spends
+  thousands of tokens before it answers, and opencode stops a run whose reply is
+  still truncated after two continuations. `compatibility.requireFinishReason =
+  false`: Ollama's OpenAI endpoint can end a stream without a finish reason.
 
-**Codex / Claude:** use the `archdoc-cloud` profile only. The provider's data-use
-terms are a user decision; the suite guarantees only what the egress log shows.
+**Mistral Vibe** (`DIR/.vibe/agents/archdoc-<tier>.toml`, an agent profile; start
+with `vibe --agent archdoc-<tier> --trust` from `DIR`):
 
-Ship `harness/opencode/`, `harness/vibe/` and a shared `harness/AGENTS.md`
-(workflow: overview → deterministic outputs → plan diagrams → write ICD narrative →
-submit → fix errors).
+- `enabled_tools = ["archdoc_*"]`, `enable_connectors = false`, archdoc's tools
+  pre-approved (`[tools.archdoc_*] permission = "always"`).
+- `system_prompt_id = "minimal"`: the coding-agent prompt is about 10k tokens, too
+  much for a 16k local window.
+- `local`: one provider and model, `allowed_models` limited to it,
+  `enable_telemetry = false`, `emits_finish_reason = false` (as for opencode) and
+  `auto_compact_threshold` at 75% of the window.
+- `DIR/run-vibe.sh` runs it headless (`vibe -p`).
+
+**Both runners** loop over sessions until the server's
+`<out>/.archdoc/harness/status.json` says no task is open or rejected and the
+outputs were written. The harness's exit status is not enough: a small model
+sometimes ends its turn after thinking without making the next call, which both
+harnesses report as a normal finish. Each step has a time limit
+(`WARMUP_TIMEOUT`, `SESSION_TIMEOUT`), and `SESSIONS` caps the sessions (opencode
+10, Vibe 40). Answers are kept, so every session picks up where the last one
+stopped.
+
+The server gets its settings from the environment (`ARCHDOC_REPO`, `ARCHDOC_OUT`,
+`ARCHDOC_TRUST`, `ARCHDOC_WINDOW`, `ARCHDOC_CONFIG`, `PLANTUML_JAR` when set at
+`harness-init` time, and `PYTHONPATH` for a source checkout), never from its command line.
+
+**Codex / Claude:** use a `cloud` profile only. The provider's data-use terms are a
+user decision; the suite guarantees only what the egress log shows.
 
 **Run the harness from a directory that is not the target repo.** The MCP server is
 given the path. A misconfigured tool permission then exposes an empty directory, not
 the source.
+
+### 13.5 Implementation status (5)
+
+`archdoc serve-mcp` (stdio, standard library only) and `archdoc harness-init`
+are in place. Both harnesses produced the full output set for the sample app
+with every tool but archdoc's disabled. The model was a local gemma4 12B
+(Ollama, 16k window), which is the hard case: a cloud agent has a larger window
+and makes fewer format slips. That full output set is 29 model tasks (use-case,
+activity, 3 sequence, 8 summaries, 9 behavior specifications, 7 ICD
+narratives), all accepted, plus 9 diagrams that pass PlantUML, the design
+description and the ICD.
+
+| | opencode 2.0.29 | Vibe 2.24.5 |
+|---|---|---|
+| tasks answered in the measured run | 16 (13 accepted earlier) | 29, from an empty output directory |
+| wall time | 46 min, one session | 57 min, 14 sessions |
+| rejected answers, then fixed and resubmitted | 1 | 8 |
+
+Rejections were format slips (an extra key, a number instead of an object,
+invalid JSON, a missing field) and one ref that was not in the input. Each was
+fixed by resubmitting with the reasons in hand, usually at the first retry; one
+behavior specification was rejected four times, each for a key the schema does not have, before it passed. Vibe compacts the
+conversation after almost every task at a 16k window, and a programmatic
+session usually ends there; the runner makes that cost a few seconds.
+
+Found while getting there:
+
+- Models often send the answer as a JSON string. With `"type": "object"` alone,
+  Ollama's OpenAI endpoint dropped such a tool call silently, so `answer` takes
+  either.
+- Vibe echoes the server command line into tool results, so a repo path in it
+  would reach a cloud model. That is why the settings travel in the environment.
+- mistral-nemo 12B writes `[TOOL_CALLS]` as text that Ollama does not parse into
+  a call. It works as a plain backend but not as a harness model.
+- **Accuracy:** gemma documented `KeyError` as an error of a FastAPI handler
+  that catches it and raises a 404 instead. The schema had allowed it, because
+  a function's error refs included everything its callees raise. The extractor
+  now records the exceptions caught around each call (`Function.caught`;
+  re-raising handlers and calls outside the `try` don't count; base classes do).
+  A behavior request offers a callee's exception only when it can reach the
+  caller, so the wrong claim cannot be expressed. The task for that function
+  then reopened by itself, and only that one.
 
 ## 14. Egress auditing
 
@@ -1099,7 +1177,8 @@ archdoc all         <repo> --backend X    # diagrams + ICDs, one extraction (--d
 archdoc design      <repo> --backend X    # summaries, behavior specs, dependency manifest, test inventory
 archdoc export      <out> --to docx,html,pdf   # convert written documents with pandoc
 archdoc check       <repo>                # ICD drift, no LLM
-archdoc serve-mcp   --repo R --out O --trust local|cloud
+archdoc serve-mcp   --repo R --out O --trust local|cloud   # or ARCHDOC_* environment
+archdoc harness-init DIR --harness opencode|vibe --repo R --out O --trust T --model M
 ```
 
 ```
@@ -1117,8 +1196,9 @@ archdoc/
   validate.py            # plantuml -syntax wrapper
   drift.py
   backends/{openai_compat,anthropic,vllm_offline}.py
-  mcp_server.py
-harness/  AGENTS.md  opencode/  vibe/
+  harness.py             # deferred backend: requests become tasks for the agent
+  mcp_server.py          # stdio JSON-RPC, standard library only
+  profiles/              # AGENTS.md and the opencode / Vibe profile writers
 tests/    fixtures/canary_repo/  ...
 ```
 
@@ -1183,7 +1263,7 @@ repo and Mermaid diagram.
 
 ## 18. Phased plan
 
-Status: Phases 0 to 3 are complete on the feature branch.
+Status: Phases 0 to 5 are complete on the feature branch.
 
 Notes from implementation:
 

@@ -86,6 +86,38 @@ def test_syntax_error_is_reported_not_raised(tmp_path):
     assert result.find_function("ok:f") is not None
 
 
+def test_caught_exceptions_do_not_reach_the_caller(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "class AppError(Exception): pass\n"
+        "class NotFound(AppError): pass\n"
+        "def find(): raise NotFound()\n"
+        "def look(): raise KeyError()\n"
+        "def boom(): raise ValueError()\n"
+        "def wrapped():\n"
+        "    try:\n        find(); look()\n"
+        "    except (AppError, LookupError):\n        return None\n"
+        "def reraised():\n"
+        "    try:\n        look()\n"
+        "    except KeyError:\n        raise\n"
+        "def partly():\n"
+        "    try:\n        boom()\n    except Exception:\n        pass\n"
+        "    boom()\n")
+    ir = extract_python(str(tmp_path))
+    assert ir.find_function("m:wrapped").caught == {"m:find": ["LookupError", "m:AppError"],
+                                                    "m:look": ["LookupError", "m:AppError"]}
+    assert ir.find_function("m:reraised").caught == {}
+    assert ir.find_function("m:partly").caught == {}      # one call to boom is outside the try
+
+    from archdoc.egress import build_function_payload
+    from archdoc.policy import load_config
+    from archdoc.pseudonym import AliasMap
+
+    def offered(fid):
+        return build_function_payload(ir, load_config(str(tmp_path)), "local", AliasMap(), fid).allowed["raises"]
+    assert offered("m:wrapped") == []                    # NotFound via its base, KeyError via LookupError
+    assert offered("m:reraised") == ["KeyError"] and offered("m:partly") == ["ValueError"]
+
+
 # -- classes ------------------------------------------------------------------
 
 def test_class_kinds(ir):

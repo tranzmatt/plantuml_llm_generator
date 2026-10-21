@@ -809,6 +809,49 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve_mcp(args: argparse.Namespace) -> int:
+    """MCP server on stdio for coding-agent harnesses (DESIGN.md 13)."""
+    from .harness import HarnessSession
+    from .mcp_server import serve_stdio
+
+    env = os.environ
+    args.repo = args.repo or env.get("ARCHDOC_REPO")
+    args.out = args.out or env.get("ARCHDOC_OUT") or "archdoc_out"
+    args.trust = args.trust or env.get("ARCHDOC_TRUST") or CLOUD
+    args.config = args.config or env.get("ARCHDOC_CONFIG")
+    args.window = args.window or int(env.get("ARCHDOC_WINDOW") or 32768)
+    if args.trust not in TIERS:
+        raise PolicyError(f"trust tier {args.trust!r}: use {' or '.join(TIERS)}")
+    if not args.repo or not os.path.isdir(args.repo):
+        raise PolicyError(f"repo {args.repo!r}: not a directory (--repo or ARCHDOC_REPO)")
+    session = HarnessSession(args.repo, args.out, trust=args.trust, config=args.config, exclude=args.exclude,
+                             window=args.window, max_entries=args.max_entries, template=args.template,
+                             design_template=args.design_template, embed=args.embed)
+    print(f"archdoc MCP server: {os.path.abspath(args.repo)} -> {os.path.abspath(args.out)} "
+          f"(tier {args.trust})", file=sys.stderr)
+    serve_stdio(session)
+    return 0
+
+
+def cmd_harness_init(args: argparse.Namespace) -> int:
+    from .profiles import write_profile
+
+    try:
+        paths = write_profile(args.dir, args.harness, args.repo, args.out, args.trust, args.model,
+                              url=args.url, config=args.config, window=args.window,
+                              context=args.context)
+    except ValueError as exc:
+        raise PolicyError(str(exc)) from None
+    for p in paths:
+        print(f"  wrote {p}")
+    agent = f"archdoc-{args.trust}"
+    run = f"opencode --agent {agent}" if args.harness == "opencode" else f"vibe --agent {agent} --trust"
+    print(f"  start it with: cd {os.path.abspath(args.dir)} && {run}")
+    print(f"  or headless:   {os.path.join(os.path.abspath(args.dir), 'run-' + args.harness + '.sh')}")
+    print("  switch profile, not model: a local profile only offers its local model")
+    return 0
+
+
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("repo", help="Path to the repository to analyse")
     p.add_argument("-o", "--output", default="archdoc_out", help="Output directory")
@@ -940,6 +983,41 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("output", nargs="?", default="archdoc_out", help="archdoc output directory")
     p.add_argument("--to", default="docx", help=f"Comma-separated: {', '.join(EXPORT_FORMATS)}")
     p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("serve-mcp", help="MCP server (stdio) for opencode, Mistral Vibe and other harnesses")
+    # each setting can also come from the environment (ARCHDOC_REPO, ...): harness
+    # profiles use that, so the command line a harness may show the model names nothing
+    p.add_argument("--repo", help="Repository to document, fixed for the session [ARCHDOC_REPO]")
+    p.add_argument("--out", help="Output directory, fixed for the session [ARCHDOC_OUT; default archdoc_out]")
+    p.add_argument("--trust", choices=TIERS,
+                   help="Tier of the harness's model [ARCHDOC_TRUST]; default cloud (pseudonymized, call graph only)")
+    p.add_argument("--config", help="Extra config TOML (overrides user and repo config) [ARCHDOC_CONFIG]")
+    p.add_argument("--exclude", action="append", default=[], metavar="GLOB")
+    p.add_argument("--window", type=int, help="Context window to pack requests for, in tokens "
+                                              "[ARCHDOC_WINDOW; default 32768]")
+    p.add_argument("--max-entries", type=int, default=3, help="Sequence diagrams to plan")
+    p.add_argument("--template", default="lightweight", help="ICD template")
+    p.add_argument("--design-template", default="lightweight", help="Design description template")
+    p.add_argument("--embed", choices=EMBED_MODES, default="svg", help="How documents include diagrams")
+    p.set_defaults(func=cmd_serve_mcp)
+
+    p = sub.add_parser("harness-init", help="Write an opencode or Vibe working directory locked to archdoc's tools")
+    p.add_argument("dir", help="Directory to write (must not be inside the target repo)")
+    p.add_argument("--harness", choices=("opencode", "vibe"), required=True)
+    p.add_argument("--repo", required=True, help="Repository to document")
+    p.add_argument("--out", required=True, help="Output directory")
+    p.add_argument("--trust", choices=TIERS, required=True,
+                   help="local: the profile offers only its local model; cloud: any model, pseudonymized input")
+    p.add_argument("--model", required=True,
+                   help="local: the model name on the server (e.g. mistral-nemo:12b); "
+                        "cloud: the harness's model id (opencode provider/model, Vibe model alias)")
+    p.add_argument("--url", help=f"local: OpenAI-compatible endpoint (default {'http://localhost:11434/v1'})")
+    p.add_argument("--config", help="Extra archdoc config TOML for the server")
+    p.add_argument("--window", type=int,
+                   help="Tokens each task's input is packed for (default: 8192 local, 32768 cloud)")
+    p.add_argument("--context", type=int,
+                   help="local: the model's context window in tokens, e.g. Ollama's num_ctx (default 16384)")
+    p.set_defaults(func=cmd_harness_init)
 
     p = sub.add_parser("eval", help="Evaluate accuracy against a reference and compare backends")
     _add_common(p)
