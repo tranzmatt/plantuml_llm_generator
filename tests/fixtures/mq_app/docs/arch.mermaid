@@ -1,0 +1,7 @@
+graph TD
+    U[Console UI] -->|Question| B[Broker]
+    B -->|Question| W[Worker]
+    W -->|Answers| B
+    B -->|Answer| U
+    W -->|Audit| B
+    W --> S[(Store)]

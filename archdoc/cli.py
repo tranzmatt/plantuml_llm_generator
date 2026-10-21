@@ -399,6 +399,62 @@ def cmd_all(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    """Structure against the spec's reference, then the same requests on every backend."""
+    from .evaluate import evaluate_model, evaluate_structure, load_spec, report_markdown
+
+    spec = load_spec(args.spec)
+    cfg = load_config(args.repo, extra=args.config)
+    ir = extract_python(args.repo, exclude=cfg.exclude + args.exclude)
+    os.makedirs(args.output, exist_ok=True)
+    structure = None
+    if spec.get("truth", {}).get("mermaid"):
+        try:
+            structure = evaluate_structure(ir, args.repo, spec)
+        except (OSError, ValueError) as exc:
+            print(f"  [SKIP] structure: {exc}")
+        else:
+            pct = lambda x: "n/a" if x is None else f"{round(100 * x)}%"   # noqa: E731
+            print(f"  structure: recall {pct(structure['recall'])}, precision {pct(structure['precision'])} "
+                  f"against {structure['reference']}")
+
+    llm_spec = spec.get("llm", {})
+    max_entries = args.max_entries or llm_spec.get("max_entries", 3)
+    runs = []
+    names = [n.strip() for n in (args.backend or "").split(",") if n.strip()]
+    if names or args.model:
+        try:
+            entries = select_entries(ir, args.entry or llm_spec.get("entries", []), max_entries,
+                                     args.depth, args.max_nodes)
+        except ValueError as exc:
+            raise PolicyError(str(exc)) from None
+        narrate = llm_spec.get("narrative", True) and not args.no_narrative
+        ifaces = list(ir.interfaces) if narrate else []
+        print(f"  {len(entries)} sequence entries, {len(ifaces)} narratives per backend")
+        for name in names or ["adhoc"]:
+            sub = argparse.Namespace(**vars(args))
+            sub.backend = None if name == "adhoc" else name
+            sub.output = os.path.join(args.output, re.sub(r"[^A-Za-z0-9_.-]+", "_", name))
+            llm = _llm_context(sub, cfg, ir)
+            if llm is None:
+                runs.append({"backend": name, "model": "unavailable"})
+                continue
+            try:
+                run = evaluate_model(llm, entries, ifaces, llm.tier)
+            finally:
+                _finish_llm(llm)
+            summary = run.summary()
+            runs.append(summary)
+            _write(os.path.join(sub.output, "details.json"), json.dumps(run.details, indent=1))
+            print("  " + ", ".join(f"{k}={v}" for k, v in summary.items()))
+
+    _write(os.path.join(args.output, "eval.json"),
+           json.dumps({"structure": structure, "models": runs}, indent=1, default=list))
+    path = _write(os.path.join(args.output, "eval.md"), report_markdown(structure, runs, ir.repo))
+    print(f"  wrote {path}")
+    return 0
+
+
 def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("repo", help="Path to the repository to analyse")
     p.add_argument("-o", "--output", default="archdoc_out", help="Output directory")
@@ -488,6 +544,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_icd_opts(p)
     _add_llm_opts(p)
     p.set_defaults(func=cmd_all)
+
+    p = sub.add_parser("eval", help="Evaluate accuracy against a reference and compare backends")
+    _add_common(p)
+    _add_llm_opts(p)
+    p.add_argument("--spec", required=True, help="Evaluation spec TOML (see eval/)")
+    p.add_argument("--no-narrative", action="store_true", help="Only evaluate sequence diagrams")
+    p.set_defaults(func=cmd_eval, max_entries=None)
     return ap
 
 

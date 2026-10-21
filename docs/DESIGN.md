@@ -119,6 +119,14 @@ Each run reports, per artifact and for the whole system:
 - **behavior coverage:** share of public functions with a behavior specification,
   split by evidence level (source / outline / signature only)
 - **open items**, by kind
+- **known unknowns:** modules using a library that implies an interface (a broker,
+  a web framework, an HTTP client) where no interface of that kind was extracted
+- **cross-checks** where two statements of the architecture disagree, each a row
+  in an ICD appendix: message channels with a publisher but no consumer (or the
+  reverse), consumers reading fields no publisher sends (A.3); deployment files
+  that leave code out of every image, require variables they do not set, set
+  variables nothing reads, or write credentials literally (A.4). The tool reports
+  the disagreement; which side is right is the rebuilder's decision.
 
 **Rebuild-readiness check** (deterministic, Phase 6): regenerate interface stubs
 (signatures, data types, routes, CLI definitions) from the documentation alone and
@@ -358,6 +366,8 @@ Each extractor implements `extract(root) -> RepoIR` and adds to the interface in
 |--------|----------|-------|
 | Python AST | structure, calls, raises, docstrings | 0 |
 | Python framework detectors | FastAPI/Flask/Django routes, argparse/Click/Typer CLIs, Celery tasks, Kafka/pika/kombu topics, SQLAlchemy models, pydantic/dataclass types, `os.getenv` names, outbound `requests`/`httpx`/`boto3` clients (*required* interfaces) | 0–2 |
+| implemented so far | FastAPI, argparse, Click, Typer, pydantic/dataclass/enum, environment (direct and through wrapper functions, required vs. defaulted per module), **pika** (queues, exchanges, routing keys, message field names from `json.dumps({...})` / `json.loads(...)[...]`), **Gradio** (UI events, inputs, outputs, port) | 0–4b |
+| docker-compose + Dockerfile | services, what each image contains and runs (ADD/COPY, WORKDIR, CMD, ENTRYPOINT), ports, depends_on, placement, where each env value comes from (never the value) | 4b |
 | `.proto` files | gRPC services, messages | 6 |
 | OpenAPI / AsyncAPI / JSON Schema files | HTTP and message interfaces, data types | 6 |
 | tree-sitter (Java, TS, Go, C/C++) | structure | 6 |
@@ -509,8 +519,8 @@ supply a neutral description that is sent instead of the real name.
 | Diagram | Producer | Input |
 |---------|----------|-------|
 | class | deterministic | classes, bases, fields, methods; composition from field types |
-| component | deterministic | module import graph by package; **provided/required interfaces** from the inventory as lollipop/socket notation |
-| deployment | LLM planner | entrypoints, IO categories, env var names, server/worker hints |
+| component | deterministic | module import graph by package; **provided/required interfaces** from the inventory as lollipop/socket notation; message interfaces drawn as the broker's queues/exchanges with publisher → channel → consumer arrows |
+| deployment | deterministic (compose files) | services and the modules each image contains; message flows through the broker's service. Repos without deployment files: LLM planner later (entrypoints, IO categories, env var names) |
 | object | LLM planner | data types with fields, constructor signatures |
 | state | LLM planner | enums, `status`/`state` fields, transition-named methods |
 | use-case | LLM planner | provided interfaces (routes, CLI commands, tasks), required interfaces as actors |
@@ -916,9 +926,31 @@ to `legacy/`.
 - **Verification tests:** injected faults (a message to the wrong owner, an
   out-of-order call, a state no code assigns, an error claim with no matching raise)
   are each caught and removed with a warning.
-- **Accuracy evaluation (Section 2.6):** precision and recall of generated sequence
-  edges and error claims against the hand-checked reference set, per model and
-  prompt version; recorded, not gated in CI.
+- **Accuracy evaluation (Section 2.6, 17.1):** recorded, not gated in CI.
+
+### 17.1 Accuracy evaluation
+
+`archdoc eval REPO --spec SPEC.toml --backend a,b,c` writes `eval.md` and
+`eval.json`. A spec names a reference diagram (Mermaid flowchart) in the
+evaluated repo, the deployment file to compare with, node-name overrides, and
+flows the reference implies but that cannot be read from it mechanically.
+
+- **Structure** (no model): reference nodes are matched to services by name.
+  Edges through a broker node are paired into service-to-service flows by shared
+  label words, and the pairing is printed so it can be checked. Each reference
+  flow is *matched* (a deployed channel connects the services), *in code, not
+  deployed*, or *missing*, with evidence: the channel, or what each side
+  publishes and consumes. Deployed flows the reference lacks are listed. Recall
+  and precision summarize, but the rows are the result: the reference can be
+  wrong too.
+- **Models**, measured against the code since no reference states sequence
+  details: same entries and narratives on every backend; answers valid first
+  time / after repair / failed; share of proposed messages verification kept;
+  share of the call graph's edges each diagram shows; names corrected; labels
+  cleared; narrative slots filled; tokens; time.
+
+The first spec, `eval/celebrity-rec-rabbitmq.toml`, uses the author's public
+repo and Mermaid diagram.
 
 ## 18. Phased plan
 
@@ -998,8 +1030,8 @@ Notes from implementation:
    clearly marked as unverified?
 6. **Tests as evidence:** read `tests/` for the test inventory even when excluded
    from diagrams (proposed default), or only on request?
-7. **Accuracy reference set:** which real repository, besides the fixture, should
-   anchor the hand-checked evaluation?
+7. ~~**Accuracy reference set**~~: github.com/tranzmatt/celebrity-rec-rabbitmq
+   (public; author's Mermaid diagram as reference), spec in `eval/`.
 8. **Glossary script:** fold into the ICD as an acronyms/terms appendix, or retire?
 9. **RAG corpus:** with JSON plans there is no need for PlantUML syntax examples.
    Retire, or repurpose (e.g. example ICD narratives)?

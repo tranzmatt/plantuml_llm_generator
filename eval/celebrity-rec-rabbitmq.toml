@@ -1,0 +1,24 @@
+# Evaluation spec for github.com/tranzmatt/celebrity-rec-rabbitmq (public).
+#   archdoc eval /path/to/celebrity-rec-rabbitmq --spec eval/celebrity-rec-rabbitmq.toml
+
+[truth]
+# The author's architecture diagram; paths are relative to the evaluated repo.
+mermaid = "docs/celebrity-recognition-system(1).mermaid"
+# Compare with the deployment that runs all six services.
+deployment = "distributed-docker-compose.yml"
+
+[truth.nodes]
+# Reference node label -> service name, "@broker" or "@external".
+# Unlisted nodes are matched to services by name.
+"RabbitMQ" = "@broker"
+
+# Broker edges are paired into flows by shared words in their labels. This one
+# shares none ("Assembled Info" in, "Results" out), so it is stated here.
+[[truth.flows]]
+from = "5. Information Assembler"
+to = "1. Gradio Interface"
+label = "Assembled Info / Results"
+
+[llm]
+max_entries = 6
+narrative = true

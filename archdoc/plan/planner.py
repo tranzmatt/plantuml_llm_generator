@@ -43,6 +43,8 @@ class PlanResult:
     errors: List[str] = field(default_factory=list)
     attempts: int = 0
     warnings: List[str] = field(default_factory=list)
+    prompt_tokens: int = 0              # summed over attempts, where the server reports them
+    completion_tokens: int = 0
 
     @property
     def ok(self) -> bool:
@@ -111,6 +113,8 @@ def run_plan(
         try:
             completion = backend.complete_json(system, user, schema, max_tokens=max_tokens)
             raw = completion.text
+            result.prompt_tokens += completion.prompt_tokens or 0
+            result.completion_tokens += completion.completion_tokens or 0
         except BackendError as exc:
             if exc.unavailable:
                 backend.unavailable = str(exc)
