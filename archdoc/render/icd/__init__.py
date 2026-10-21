@@ -49,6 +49,16 @@ def _typecell(t: Optional[Dict[str, Any]]) -> str:
     return f"[{code}](#{t['anchor']})" if t.get("anchor") else code
 
 
+def _mark(item: Dict[str, Any], field: str) -> str:
+    """Origin marker after a description: generated, reviewed, or reviewed but stale."""
+    review = item.get(f"{field}_review")
+    if review == "stale":
+        return " *(reviewed; the code changed since: re-review)*"
+    if review == "reviewed":
+        return " *(reviewed)*"
+    return " *(generated)*" if item.get(f"{field}_generated") else ""
+
+
 def environment(template_dir: str = TEMPLATE_DIR) -> jinja2.Environment:
     env = jinja2.Environment(
         loader=jinja2.FileSystemLoader(template_dir),
@@ -58,7 +68,7 @@ def environment(template_dir: str = TEMPLATE_DIR) -> jinja2.Environment:
         undefined=jinja2.StrictUndefined,
         autoescape=False,
     )
-    env.filters.update(cell=_cell, code=_code, tbd=_tbd, yn=_yn, typecell=_typecell)
+    env.filters.update(cell=_cell, code=_code, tbd=_tbd, yn=_yn, typecell=_typecell, mark=_mark)
     return env
 
 

@@ -16,8 +16,8 @@ and produces both PlantUML diagrams and Interface Control Documents (ICDs).
 See [docs/DESIGN.md](docs/DESIGN.md).
 
 ```bash
-pip install -e .                                   # Python 3.11+, needs jinja2
-archdoc all ~/Code/YourProject -o archdoc_out      # class + component diagrams and an ICD, no LLM
+pip install -e .                                   # Python 3.11+
+archdoc all ~/Code/YourProject -o archdoc_out      # class, component, deployment and flow diagrams and an ICD, no LLM
 archdoc egress ~/Code/YourProject --trust cloud    # show exactly what a cloud model would receive
 ```
 
@@ -54,8 +54,20 @@ Hosts on VPN/CGNAT ranges (e.g. NetBird or Tailscale 100.x addresses) must be li
 in `[trust] local_hosts` before they're accepted as local.
 
 Set `PLANTUML_JAR=/path/to/plantuml.jar` (or put `plantuml` on PATH) to
-syntax-check every generated diagram. Activity, state, use-case, deployment and
-object diagrams are not yet on this path; use the scripts below for those.
+syntax-check every generated diagram. Activity, state, use-case and object
+diagrams are not yet on this path; use the scripts below for those.
+
+Every output has a `<name>.provenance.json` beside it, classing each item as
+fact (from code), derived (model, with the request it came from), open (TBD) or
+reviewed. To review, edit `archdoc_out/review/review.yaml`: set an entry's
+`status` to `approved`, `edited` (with your `text`) or `rejected`. Reruns keep
+your decisions, skip the model for them, and mark them *re-review* when the code
+they describe changes. Approved sequence diagrams are redrawn from
+`review/plans/` with no model at all.
+
+`archdoc eval REPO --spec eval/<name>.toml --backend a,b,c` compares the
+extracted architecture with a reference diagram and the backends with each other
+(see `eval/celebrity-rec-rabbitmq.toml`).
 
 ---
 

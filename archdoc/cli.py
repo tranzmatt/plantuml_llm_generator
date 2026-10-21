@@ -10,6 +10,7 @@ from collections import Counter
 
 import re
 import time
+from types import SimpleNamespace
 
 from .backends import BackendError, make_backend, ollama_remote_host
 from .coverage import coverage_lines, icd_coverage
@@ -18,11 +19,13 @@ from .extract import extract_python
 from .extract.python_ast import collect_python_files
 from .policy import PolicyError, load_config
 from .pseudonym import AliasMap
-from .plan.artifacts import PlanContext, plan_narrative, plan_sequence
-from .plan.entries import call_slice, select_entries
+from .plan.artifacts import PlanContext, check_sequence, plan_narrative, plan_sequence
+from .plan.verify import verify_sequence
+from .plan.entries import Entry, call_slice, discover_entries, select_entries
 from .render.icd import anchor, apply_narrative, build_icd_context, inventory_snapshot, render_icd
 from .render.puml.sequence import render_sequence_diagram
 from . import provenance
+from .review import Review, apply_to_icd, icd_evidence, offer_icd, sequence_evidence
 from .flows import flow_entries, trace
 from .render.puml import (
     render_class_diagram, render_component_diagram, render_deployment_diagram, render_flow_diagram,
@@ -217,16 +220,62 @@ def _save_plan(args, artifact: str, plan) -> None:
     _write(path, json.dumps(plan, indent=1, ensure_ascii=False))
 
 
-def _sequence_files(ir, args, llm):
-    """[(stem, title, text)] for LLM-planned sequence diagrams."""
+def _reviewed_sequence(ir, args, e, review, decision):
+    """(stem, title, text, note, provenance) for a reviewed plan, or None if its plan file is missing."""
+    plan = review.load_plan(e.handler)
+    if plan is None:
+        print(f"  [WARN] sequence:{e.handler} is {decision['status']} but {review.plan_path(e.handler)} is missing")
+        return None
+    ids = call_slice(ir, e.handler, args.depth, args.max_nodes)
+    stale = review.is_stale(f"sequence:{e.handler}", sequence_evidence(ir, ids))
+    issues = check_sequence(plan) or [str(x) for x in verify_sequence(ir, plan, ids, e.handler)]
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", e.handler).strip("_")
+    stem = f"{ir.repo}_sequence_{slug}"
+    title = f"{e.via[0].name}: {e.via[1].name}" if e.via else e.label
+    if stale:
+        plan = {**plan, "title": f"{plan.get('title') or title} [reviewed before a code change: re-review]"}
+    client = "User" if e.via and e.via[0].kind == "cli" else "Client"
+    text, warnings = render_sequence_diagram(ir, plan, stem, client_name=client, title=title)
+    for w in warnings + [f"reviewed plan disagrees with the code: {x}" for x in issues]:
+        print(f"  [WARN] {stem}: {w}")
+    items = provenance.sequence_items(ir, SimpleNamespace(plan=plan), ids, e.handler)
+    for it in items:
+        it.update({"class": "reviewed", "stale": stale})
+        it.pop("request", None)
+    prov = {"producer": "review", "items": items,
+            "extra": {"entry": e.handler, "review": {"status": decision["status"], "stale": stale,
+                                                     "plan": os.path.relpath(review.plan_path(e.handler), args.output),
+                                                     "disagreements": issues}, "slice": ids}}
+    return stem, f"{ir.repo}: {plan.get('title') or e.label}", text, f"(reviewed{', STALE' if stale else ''})", prov
+
+
+def _sequence_files(ir, args, llm, review):
+    """(stem, title, text, note, provenance) for sequence diagrams: reviewed plans as they
+    are, the rest planned by the LLM (when there is one) and offered for review."""
     out = []
     try:
-        entries = select_entries(ir, args.entry, args.max_entries, args.depth, args.max_nodes)
+        entries = select_entries(ir, args.entry, args.max_entries, args.depth, args.max_nodes) if llm else []
     except ValueError as exc:
         raise PolicyError(str(exc)) from None
+    known = {e.handler: e for e in discover_entries(ir)}
+    for item_id in sorted(review.items):
+        h = item_id.split(":", 1)[1] if item_id.startswith("sequence:") else None
+        if h and review.decided(item_id) and h not in {e.handler for e in entries}:
+            entries.append(known.get(h) or Entry(h, h))
     if not entries:
         print("  [SKIP] sequence: no entry points with internal calls found (use --entry)")
     for e in entries:
+        decision = review.decided(f"sequence:{e.handler}")
+        if decision and decision["status"] == "rejected":
+            print(f"  [SKIP] sequence for {e.label}: rejected in review")
+            continue
+        if decision:
+            reviewed = _reviewed_sequence(ir, args, e, review, decision)
+            if reviewed:
+                out.append(reviewed)
+                continue
+        if llm is None:
+            continue
         t0 = time.monotonic()
         result = plan_sequence(llm, e)
         took = time.monotonic() - t0
@@ -242,6 +291,8 @@ def _sequence_files(ir, args, llm):
             ir, result.plan, stem, client_name=client,
             title=f"{e.via[0].name}: {e.via[1].name}" if e.via else e.label)
         _save_plan(args, f"sequence_{slug}", result.plan)
+        review.offer_plan(e.handler, result.plan,
+                          sequence_evidence(ir, call_slice(ir, e.handler, llm.depth, llm.max_nodes)))
         for w in result.warnings + warnings:
             print(f"  [WARN] {stem}: {w}")
         ids = call_slice(ir, e.handler, llm.depth, llm.max_nodes)
@@ -327,11 +378,15 @@ def _generate_diagrams(ir, args, llm=None) -> list:
     if later:
         print(f"  [SKIP] {', '.join(later)}: not implemented yet")
     planned = [t for t in types if t in PLANNED_DIAGRAMS]
+    review = Review(args.output)
+    reviewed_seq = any(k.startswith("sequence:") and review.decided(k) for k in review.items)
     if planned and llm is None:
-        print(f"  [SKIP] {', '.join(planned)}: needs an LLM (--backend NAME or --model MODEL)")
+        print(f"  [SKIP] {', '.join(planned)}: needs an LLM (--backend NAME or --model MODEL)"
+              + (" except reviewed sequence diagrams" if reviewed_seq else ""))
     files = _diagram_files(ir, types, args.component_depth, args.max_classes, args.members)
-    if "sequence" in planned and llm is not None:
-        files += _sequence_files(ir, args, llm)
+    if "sequence" in planned and (llm is not None or reviewed_seq):
+        files += _sequence_files(ir, args, llm, review)
+        _save_review(review)
     written = []
     validate = not args.no_validate and plantuml_command() is not None
     failures = 0
@@ -355,9 +410,22 @@ def _generate_diagrams(ir, args, llm=None) -> list:
     return written
 
 
+def _has_open_slot(ctx, iface_id) -> bool:
+    """Whether narrative could still fill anything (reviewed and rejected slots are settled)."""
+    i = next((x for x in ctx["interfaces"] if x["id"] == iface_id), None)
+    if i is None:
+        return False
+    slots = [(i, "purpose")] + [(o, "summary") for o in i["operations"]] + \
+        [(p, "description") for o in i["operations"] for p in o["params"]]
+    return any(not s.get(f) and not s.get(f"{f}_rejected") for s, f in slots)
+
+
 def _narrate(llm, ctx, ifaces) -> None:
     """Fill the ICD context; records each request in ctx["requests"] for the sidecar."""
     for iface in ifaces:
+        if not _has_open_slot(ctx, iface.id):
+            print(f"  narrative for {iface.name}: nothing open (reviewed or from code)")
+            continue
         t0 = time.monotonic()
         result = plan_narrative(llm, iface)
         took = time.monotonic() - t0
@@ -378,11 +446,15 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
     if args.narrative and llm is None:
         print("  [SKIP] narrative: needs an LLM (--backend NAME or --model MODEL)")
     narrate = args.narrative and llm is not None
+    review = Review(args.output)
+    evidence = icd_evidence(ir)
     if args.scope == "system":
         ctx = build_icd_context(ir, diagrams=links, generated=generated)
+        apply_to_icd(ctx, review, evidence)
         if narrate:
             ctx["narrative_aliased"] = llm.config.policy_for(llm.tier).pseudonymize != "off"
             _narrate(llm, ctx, ir.interfaces)
+        offer_icd(ctx, review, evidence)
         ctx["coverage"] = icd_coverage(ctx, ir)
         _write(os.path.join(args.output, "coverage.json"), json.dumps(ctx["coverage"], indent=1))
         path = _write(os.path.join(icd_dir, f"{ir.repo}_icd.md"), render_icd(ctx, args.template))
@@ -395,16 +467,27 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
         for iface in ir.interfaces:
             ctx = build_icd_context(ir, [iface], title=f"{iface.name} Interface Control Document",
                                     diagrams=links, generated=generated)
+            apply_to_icd(ctx, review, evidence)
             if narrate:
                 ctx["narrative_aliased"] = llm.config.policy_for(llm.tier).pseudonymize != "off"
                 _narrate(llm, ctx, [iface])
+            offer_icd(ctx, review, evidence)
             ctx["coverage"] = icd_coverage(ctx, ir)
             path = _write(os.path.join(icd_dir, f"{anchor(iface.id)}.md"), render_icd(ctx, args.template))
             _icd_sidecar(args, ir, ctx, path, llm if narrate else None)
             print(f"  wrote {path}")
+    _save_review(review)
     snap = os.path.join(_state_dir(args.output), "icd_snapshot.json")
     with open(snap, "w", encoding="utf-8") as fh:
         json.dump(inventory_snapshot(ir), fh, indent=1)
+
+
+def _save_review(review) -> None:
+    path = review.save()
+    counts = review.counts()
+    print(f"  review: {path} ({', '.join(f'{v} {k}' for k, v in sorted(counts.items())) or 'empty'})")
+    for item_id in review.stale:
+        print(f"  [STALE] {item_id}: reviewed before the code changed; re-review")
 
 
 def _icd_sidecar(args, ir, ctx, path, llm) -> None:

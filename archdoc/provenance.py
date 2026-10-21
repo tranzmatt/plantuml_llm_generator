@@ -9,6 +9,8 @@ Every item is one of three classes:
            model was shown (real ids, detail level, aliased or not), which
            model answered, prompt version and payload hash
   open     the code cannot answer it; rendered as TBD
+  reviewed decided by a person in the review overlay (archdoc.review);
+           `stale` when the code it describes changed since
 
 Sequence messages are model choices checked against the call graph, so they
 are `derived` with `verified: true`; their labels are `derived` when the
@@ -165,28 +167,34 @@ def icd_items(context: Dict[str, Any], request_index: Dict[str, int]) -> List[Di
     """Every describable slot of an ICD context, classed after narrative was applied."""
     items: List[Dict[str, Any]] = []
 
-    def slot(item_id: str, value: Any, generated: bool, evidence: List[str], iface_id: str) -> None:
-        if not value:
+    def slot(item_id: str, obj: Dict[str, Any], fld: str, evidence: List[str], iface_id: str) -> None:
+        review = obj.get(f"{fld}_review")
+        if review:
+            cls = "reviewed"
+        elif not obj.get(fld):
             cls = "open"
-        elif generated:
+        elif obj.get(f"{fld}_generated"):
             cls = "derived"
         else:
             cls = "fact"
         it: Dict[str, Any] = {"id": item_id, "class": cls, "evidence": [e for e in evidence if e]}
         if cls == "derived":
             it["request"] = request_index.get(iface_id)
+        if review:
+            it["stale"] = review == "stale"
+        if obj.get(f"{fld}_rejected"):
+            it["rejected_in_review"] = True
         items.append(it)
 
     for i in context["interfaces"]:
-        slot(f"purpose:{i['id']}", i.get("purpose"), i.get("purpose_generated"), [i["id"]], i["id"])
+        slot(f"purpose:{i['id']}", i, "purpose", [i["id"]], i["id"])
         for o in i["operations"]:
-            slot(f"op:{o['id']}", o.get("summary"), o.get("summary_generated"), [o["id"], o.get("handler")], i["id"])
+            slot(f"op:{o['id']}", o, "summary", [o["id"], o.get("handler")], i["id"])
             for p in o["params"]:
-                slot(f"param:{o['id']}:{p['name']}", p.get("description"), p.get("description_generated"),
-                     [o["id"]], i["id"])
+                slot(f"param:{o['id']}:{p['name']}", p, "description", [o["id"]], i["id"])
     for d in context["data_types"]:
-        slot(f"type:{d['id']}", d.get("description"), False, [d["id"]], "")
+        slot(f"type:{d['id']}", d, "description", [d["id"]], "")
         for f in d["fields"]:
             if d["source"] != "enum":
-                slot(f"field:{d['id']}.{f['name']}", f.get("description"), False, [d["id"]], "")
+                slot(f"field:{d['id']}.{f['name']}", f, "description", [d["id"]], "")
     return items

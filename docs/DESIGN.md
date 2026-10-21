@@ -175,6 +175,23 @@ answer.
   item id and the hash of the evidence they were based on. Regeneration never
   overwrites a reviewed item. If the underlying code changes, the item is
   flagged *stale* for re-review instead.
+
+  *Implemented (4b):* `<out>/review/review.yaml`, keyed by the sidecar item ids
+  (`purpose:`, `op:`, `param:`, `type:`, `field:`, `sequence:`). Every run offers
+  generated and open slots as `pending` with their current text; the reviewer
+  sets `approved`, `edited` (their `text`, which also fills a TBD by hand) or
+  `rejected` (stays TBD). Decided entries are never rewritten and are applied
+  before narrative, so the model is not asked again; an interface with nothing
+  left open gets no request. Evidence hashes cover the facts an item describes
+  (operation + handler signature, field, data type, a sequence slice's
+  signatures and calls). On mismatch the reviewed text is kept, marked *re-review*
+  in the document, listed as an open item, and `current_evidence` is written
+  next to it, so re-approving means copying one value. Approved sequence plans live in
+  `review/plans/` (editable), are redrawn without a model or backend, and are
+  re-verified against the code, with disagreements reported, never pruned.
+  Provenance gains a fourth class, `reviewed`. Not yet: reviewing the
+  standard per-interface questions (authentication, rate limits), which are open
+  items without a slot.
 - **Accuracy evaluation:** a hand-checked reference set for the fixture repo and at
   least one real repo. Measured as precision and recall of sequence edges against
   the call graph, error claims against raises, and a reviewer score for behavior

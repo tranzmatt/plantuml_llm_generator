@@ -60,7 +60,8 @@ class _Builder:
         self.gaps: List[Dict[str, str]] = []
 
     def gap(self, where: str, what: str, link: Optional[str] = None, key: Optional[str] = None) -> None:
-        """`key` lets narrative close the gap: purpose:<iface>, op:<op>, param:<op>:<name>."""
+        """`key` lets narrative or review close the gap: purpose:<iface>, op:<op>,
+        param:<op>:<name>, type:<data type>, field:<data type>.<name>."""
         self.gaps.append({"where": where, "what": what, "anchor": link or "", "key": key or ""})
 
     def ref_type(self, type_id: Optional[str]) -> None:
@@ -147,12 +148,11 @@ class _Builder:
     def data_type(self, d: DataType) -> Dict[str, Any]:
         link = anchor(f"dt-{d.id}")
         if not d.docstring:
-            self.gap(d.name, "data type description", link)
+            self.gap(d.name, "data type description", link, key=f"type:{d.id}")
         fields = []
-        missing = []
         for f in d.fields:
             if d.source != "enum" and not f.docstring:
-                missing.append(f.name)
+                self.gap(d.name, f"description of field `{f.name}`", link, key=f"field:{d.id}.{f.name}")
             fields.append({
                 "name": f.name,
                 "type": {"display": f.annotation,
@@ -162,8 +162,6 @@ class _Builder:
                 "constraints": _constraints_text(f),
                 "description": f.docstring,
             })
-        if missing:
-            self.gap(d.name, f"field descriptions ({', '.join(f'`{m}`' for m in missing)})", link)
         return {
             "id": d.id, "anchor": link, "name": d.name, "source": d.source,
             "description": _first_paragraph(d.docstring), "fields": fields,
@@ -203,6 +201,7 @@ def build_icd_context(
         "generated_items": 0,
         "narrative_aliased": False,
         "coverage": None,                  # set by archdoc.coverage.icd_coverage after narrative
+        "reviewed_items": 0,               # set by archdoc.review.apply_to_icd
         "diagrams": diagrams or [],
     }
 
@@ -218,7 +217,7 @@ def apply_narrative(context: Dict[str, Any], interface_id: str, narrative: Dict[
         return 0
     closed: Set[str] = set()
     purpose = (narrative.get("purpose") or "").strip()
-    if purpose and not iface["purpose"]:
+    if purpose and not iface["purpose"] and not iface.get("purpose_rejected"):
         iface["purpose"], iface["purpose_generated"] = purpose, True
         closed.add(f"purpose:{interface_id}")
     ops = {o["id"]: o for o in iface["operations"]}
@@ -227,14 +226,14 @@ def apply_narrative(context: Dict[str, Any], interface_id: str, narrative: Dict[
         if op is None:
             continue
         summary = (item.get("summary") or "").strip()
-        if summary and not op["summary"]:
+        if summary and not op["summary"] and not op.get("summary_rejected"):
             op["summary"], op["summary_generated"] = summary, True
             closed.add(f"op:{op['id']}")
         params = {p["name"]: p for p in op["params"]}
         for pn in item.get("params", []):
             p = params.get(pn.get("name"))
             desc = (pn.get("description") or "").strip()
-            if p is not None and desc and not p["description"]:
+            if p is not None and desc and not p["description"] and not p.get("description_rejected"):
                 p["description"], p["description_generated"] = desc, True
                 closed.add(f"param:{op['id']}:{p['name']}")
     context["gaps"] = [g for g in context["gaps"] if not g.get("key") or g["key"] not in closed]

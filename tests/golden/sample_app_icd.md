@@ -282,5 +282,8 @@ Values: `ACTIVE`, `RETIRED`
 | 37 | [shop.api.router / GET /{item_id}](#if-http-shop-api-router-get-item-id) | description of `verbose` |
 | 38 | [shop.api.router / GET /{item_id}](#if-http-shop-api-router-get-item-id) | description of `limit` |
 | 39 | [shop.api.router / POST /](#if-http-shop-api-router-post) | operation description |
-| 40 | [Item](#dt-shop-models-item) | field descriptions (`id`, `price`, `status`, `tags`) |
-| 41 | [Status](#dt-shop-models-status) | data type description |
+| 40 | [Item](#dt-shop-models-item) | description of field `id` |
+| 41 | [Item](#dt-shop-models-item) | description of field `price` |
+| 42 | [Item](#dt-shop-models-item) | description of field `status` |
+| 43 | [Item](#dt-shop-models-item) | description of field `tags` |
+| 44 | [Status](#dt-shop-models-status) | data type description |

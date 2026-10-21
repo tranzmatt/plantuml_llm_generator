@@ -26,6 +26,11 @@
 > identifiers pseudonymized (the model never saw real names, so its wording
 > is especially speculative){% endif %}, and should be reviewed.
 {% endif %}
+{% if reviewed_items %}
+> {{ reviewed_items }} descriptions marked *(reviewed)* were written or approved
+> by a reviewer (`review/review.yaml`); any marked *re-review* predate a change
+> to the code they describe.
+{% endif %}
 
 ## 1. Scope
 
@@ -51,13 +56,13 @@
 | Owner | {{ i.owner | code }} |
 | Protocol | {{ i.protocol | cell }} |
 {% if i.address %}| Address | {{ i.address | code }} |
-{% endif %}| Purpose | {{ i.purpose | tbd }}{% if i.purpose_generated %} *(generated)*{% endif %} |
+{% endif %}| Purpose | {{ i.purpose | tbd }}{{ i | mark("purpose") }} |
 {% if i.kind == "env" %}
 
 | Variable | Default | Required (no default) in | Used in | Description |
 |----------|---------|--------------------------|---------|-------------|
 {% for op in i.operations -%}
-| <a id="{{ op.anchor }}"></a>{{ op.name | code }} | {% if op.meta.get("defaults_differ") %}differs by module{% else %}{{ op.meta.get("default") | code }}{% endif %} | {{ op.meta.get("required_in") | cell }} | {{ op.meta.get("used_in") | cell }} | {{ op.summary | tbd }}{% if op.summary_generated %} *(generated)*{% endif %} |
+| <a id="{{ op.anchor }}"></a>{{ op.name | code }} | {% if op.meta.get("defaults_differ") %}differs by module{% else %}{{ op.meta.get("default") | code }}{% endif %} | {{ op.meta.get("required_in") | cell }} | {{ op.meta.get("used_in") | cell }} | {{ op.summary | tbd }}{{ op | mark("summary") }} |
 {% endfor %}
 {% else %}
 {% set outer = loop %}
@@ -66,7 +71,7 @@
 <a id="{{ op.anchor }}"></a>
 #### 3.{{ outer.index }}.{{ loop.index }} {{ op.name | code }}
 
-{{ op.summary | tbd }}{% if op.summary_generated %} *(generated)*{% endif %}
+{{ op.summary | tbd }}{{ op | mark("summary") }}
 
 
 {% if op.handler %}
@@ -104,19 +109,19 @@
 | Field | Type | Description |
 |-------|------|-------------|
 {% for p in op.params -%}
-| {{ p.name | code }} | {{ p.type | typecell }} | {{ p.description | tbd }}{% if p.description_generated %} *(generated)*{% endif %} |
+| {{ p.name | code }} | {{ p.type | typecell }} | {{ p.description | tbd }}{{ p | mark("description") }} |
 {% endfor %}
 {% elif i.kind == "cli" %}
 | Argument | Type | Required | Default | Constraints | Description |
 |----------|------|----------|---------|-------------|-------------|
 {% for p in op.params -%}
-| {{ (p.flags or p.name) | code }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }}{% if p.description_generated %} *(generated)*{% endif %} |
+| {{ (p.flags or p.name) | code }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }}{{ p | mark("description") }} |
 {% endfor %}
 {% else %}
 | Parameter | In | Type | Required | Default | Constraints | Description |
 |-----------|----|------|----------|---------|-------------|-------------|
 {% for p in op.params -%}
-| {{ p.name | code }} | {{ p.location | cell }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }}{% if p.description_generated %} *(generated)*{% endif %} |
+| {{ p.name | code }} | {{ p.location | cell }} | {{ p.type | typecell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.constraints | cell }} | {{ p.description | tbd }}{{ p | mark("description") }} |
 {% endfor %}
 {% endif %}
 {% else %}
@@ -136,7 +141,7 @@
 <a id="{{ d.anchor }}"></a>
 ### 4.{{ loop.index }} {{ d.name }} ({{ d.source }})
 
-{{ d.description | tbd }}
+{{ d.description | tbd }}{{ d | mark("description") }}
 
 {% if d.source == "enum" %}
 Values: {% for f in d.fields %}{{ f.name | code }}{% if not loop.last %}, {% endif %}{% endfor %}
@@ -145,7 +150,7 @@ Values: {% for f in d.fields %}{{ f.name | code }}{% if not loop.last %}, {% end
 | Field | Type | Required | Default | Constraints | Description |
 |-------|------|----------|---------|-------------|-------------|
 {% for f in d.fields -%}
-| {{ f.name | code }} | {{ f.type | typecell }} | {{ f.required | yn }} | {{ f.default | code }} | {{ f.constraints | cell }} | {{ f.description | tbd }} |
+| {{ f.name | code }} | {{ f.type | typecell }} | {{ f.required | yn }} | {{ f.default | code }} | {{ f.constraints | cell }} | {{ f.description | tbd }}{{ f | mark("description") }} |
 {% endfor %}
 {% endif %}
 {% endfor %}
