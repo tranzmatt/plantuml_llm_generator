@@ -162,6 +162,21 @@ describe behavior rather than reproduce it:
   interface.
 - Every document records what it was derived from (git commit, IR hash).
 
+*Implemented (4b):* `archdoc.overlap`. The protected text is everything in the repo's
+Python files except interface: function and class bodies, comments and string
+literals, with def/class headers, decorators, docstrings and imports removed
+(docstrings are already quoted as facts). It is indexed as runs of `min_words`
+(default 8) lowercased words, from the whole file, not only what the model was
+shown, since a model can reproduce public code from training. Every
+model-written string (sequence labels, group labels, titles, ICD purposes,
+summaries and parameter descriptions) is checked inside validation, so an
+overlap is sent back in the repair round. The repair message says where
+(`purpose repeats 14 consecutive words...`), never what, so no source text
+leaves in a repair. What still overlaps is cleared (`[overlap] mode = "reject"`,
+default) or kept and reported (`"flag"`); warnings and sidecars give the
+length and `path:line`. `archdoc eval` counts overlaps per backend. Building the
+index for pip (398 modules) takes about 6 s.
+
 The suite provides traceability and the overlap guard. Whether a given rebuild
 process meets a particular IP requirement is a legal question the tool does not
 answer.

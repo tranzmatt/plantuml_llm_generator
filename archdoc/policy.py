@@ -93,6 +93,9 @@ class Config:
     llm_prefer: List[str] = field(default_factory=list)
     # whether that search may pick a cloud backend; never implied
     llm_allow_cloud_fallback: bool = False
+    # [overlap]: verbatim-overlap guard on model-written text (DESIGN.md 2.5)
+    overlap_mode: str = "reject"
+    overlap_min_words: int = 8
     sources: List[str] = field(default_factory=list)   # config files that were read
 
     def policy_for(self, tier: str) -> EgressPolicy:
@@ -132,7 +135,7 @@ def stricter(a: EgressPolicy, b: EgressPolicy) -> EgressPolicy:
 # Loading
 # ---------------------------------------------------------------------------
 
-_TOP_KEYS = {"policy", "paths", "secrets", "trust", "backends", "llm"}
+_TOP_KEYS = {"policy", "paths", "secrets", "trust", "backends", "llm", "overlap"}
 
 
 def _read_toml(path: str) -> Dict[str, Any]:
@@ -212,4 +215,15 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
     if missing:
         raise PolicyError(f"{src}: [llm] prefer names undefined backend(s): {', '.join(missing)}")
     cfg.llm_allow_cloud_fallback = bool(llm.get("allow_cloud_fallback", False))
+
+    ov = data.get("overlap", {})
+    unknown = set(ov) - {"mode", "min_words"}
+    if unknown:
+        raise PolicyError(f"{src}: [overlap] unknown key(s) {', '.join(sorted(unknown))}")
+    cfg.overlap_mode = ov.get("mode", "reject")
+    if cfg.overlap_mode not in ("reject", "flag", "off"):
+        raise PolicyError(f"{src}: [overlap] mode must be 'reject', 'flag' or 'off'")
+    cfg.overlap_min_words = int(ov.get("min_words", 8))
+    if cfg.overlap_min_words < 4:
+        raise PolicyError(f"{src}: [overlap] min_words below 4 would flag ordinary phrases")
     return cfg

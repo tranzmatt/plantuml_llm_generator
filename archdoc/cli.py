@@ -25,6 +25,7 @@ from .plan.entries import Entry, call_slice, discover_entries, select_entries
 from .render.icd import anchor, apply_narrative, build_icd_context, inventory_snapshot, render_icd
 from .render.puml.sequence import render_sequence_diagram
 from . import provenance
+from .overlap import SourceIndex
 from .review import Review, apply_to_icd, icd_evidence, offer_icd, sequence_evidence
 from .flows import flow_entries, trace
 from .render.puml import (
@@ -208,6 +209,7 @@ def _llm_context(args, cfg, ir):
             backend=llm_backend,
             log=EgressLog(os.path.join(state, "egress.jsonl")),
             depth=args.depth, max_nodes=args.max_nodes, alias_path=alias_path,
+            overlap=SourceIndex(args.repo, ir, cfg.overlap_min_words, cfg.overlap_mode),
         )
     print("  [SKIP] LLM outputs: no usable backend; writing the rest without it")
     for t in tried:

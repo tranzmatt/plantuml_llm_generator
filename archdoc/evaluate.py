@@ -298,6 +298,7 @@ class ModelRun:
     edges_total: int = 0
     corrected_names: int = 0
     cleared_labels: int = 0
+    overlaps: int = 0
     narrative_items: int = 0
     narrative_slots: int = 0
     prompt_tokens: int = 0
@@ -316,6 +317,7 @@ class ModelRun:
             "call_edges_shown_pct": pct(self.edges_shown, self.edges_total),
             "removed_groups": self.removed_groups,
             "corrected_names": self.corrected_names, "cleared_labels": self.cleared_labels,
+            "verbatim_overlaps": self.overlaps,
             "narrative_filled_pct": pct(self.narrative_items, self.narrative_slots),
             "prompt_tokens": self.prompt_tokens, "completion_tokens": self.completion_tokens,
             "minutes": round(self.seconds / 60, 1),
@@ -335,6 +337,8 @@ def _count(result, run: ModelRun) -> None:
     for w in result.warnings:
         if w.startswith("corrected misspelled name"):
             run.corrected_names += 1
+        if w.startswith("overlap:"):
+            run.overlaps += 1
         m = re.match(r"cleared (\d+) label", w)
         if m:
             run.cleared_labels += int(m.group(1))
@@ -423,7 +427,7 @@ def report_markdown(structure: Optional[Dict[str, Any]], runs: List[Dict[str, An
                 ("valid_first_attempt_pct", "Valid 1st try %"), ("valid_after_repair", "Repaired"),
                 ("failed", "Failed"), ("messages_kept_pct", "Messages kept %"),
                 ("call_edges_shown_pct", "Call edges shown %"), ("removed_groups", "Groups removed"),
-                ("corrected_names", "Names corrected"), ("cleared_labels", "Labels cleared"),
+                ("corrected_names", "Names corrected"), ("cleared_labels", "Labels cleared"), ("verbatim_overlaps", "Verbatim overlaps"),
                 ("narrative_filled_pct", "Narrative filled %"), ("completion_tokens", "Output tokens"),
                 ("minutes", "Minutes")]
         out += ["", "## Models", "",

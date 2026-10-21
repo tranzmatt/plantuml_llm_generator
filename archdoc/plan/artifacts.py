@@ -12,6 +12,8 @@ from ..interfaces import Interface
 from ..ir import RepoIR
 from ..policy import Config
 from ..pseudonym import ALIAS_RE, AliasMap
+from .. import overlap as overlap_guard
+from ..overlap import SourceIndex
 from . import prompts
 from .entries import Entry, call_slice
 from .planner import PlanResult, run_plan
@@ -30,6 +32,7 @@ class PlanContext:
     depth: int = 3
     max_nodes: int = 25
     alias_path: Optional[str] = None     # where the alias map is persisted after the run
+    overlap: Optional[SourceIndex] = None   # verbatim-overlap guard (None: not checked)
 
 
 def dedupe_participants(plan: Any) -> None:
@@ -159,7 +162,8 @@ def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
         if structural:
             return structural
         fix_reply_flags(plan)
-        return [str(x) for x in verify_sequence(ctx.ir, plan, ids, entry.handler)]
+        return [str(x) for x in verify_sequence(ctx.ir, plan, ids, entry.handler)] + \
+            overlap_guard.errors(ctx.overlap, overlap_guard.sequence_texts(plan))
 
     system, instructions = prompts.sequence_prompts(bool(ALIAS_RE.search(payload.text)))
     result = run_plan(ctx.backend, payload, schema, system, instructions, ctx.aliases, validate=validate, log=ctx.log)
@@ -174,6 +178,7 @@ def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
     result.warnings += keep_grounded_labels(result)          # indexes still match the raw answer
     if not result.payload_aliased:
         result.warnings += correct_misspelled_names(ctx.ir, result.plan, ids)
+    result.warnings += overlap_guard.enforce(ctx.overlap, result.plan, overlap_guard.sequence_texts(result.plan))
     removed, plan_issues = prune_sequence(ctx.ir, result.plan, ids, entry.handler)
     result.warnings += removed + [f"unresolved: {x}" for x in plan_issues]
     if not any(m.get("call") for m in result.plan["messages"]):
@@ -201,7 +206,18 @@ def plan_narrative(ctx: PlanContext, iface: Interface) -> PlanResult:
     payload = build_interface_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, iface)
     schema = narrative_schema(payload.allowed["operations"], payload.allowed["params"])
     system, instructions = prompts.narrative_prompts(bool(ALIAS_RE.search(payload.text)))
-    return run_plan(ctx.backend, payload, schema, system, instructions, ctx.aliases, validate=check_narrative, log=ctx.log)
+
+    def validate(plan: Any) -> List[str]:
+        return check_narrative(plan) + overlap_guard.errors(ctx.overlap, overlap_guard.narrative_texts(plan))
+
+    result = run_plan(ctx.backend, payload, schema, system, instructions, ctx.aliases,
+                      validate=validate, log=ctx.log)
+    if not result.ok and result.candidate is not None and not check_narrative(result.candidate):
+        # only the overlap check failed after repair: keep the rest, clear what overlaps
+        result.plan, result.raw, result.errors = result.candidate, result.candidate_raw, []
+    if result.ok:
+        result.warnings += overlap_guard.enforce(ctx.overlap, result.plan, overlap_guard.narrative_texts(result.plan))
+    return result
 
 
 __all__ = ["CLIENT", "PlanContext", "check_narrative", "check_sequence", "drop_unused_participants",

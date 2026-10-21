@@ -65,6 +65,11 @@ your decisions, skip the model for them, and mark them *re-review* when the code
 they describe changes. Approved sequence diagrams are redrawn from
 `review/plans/` with no model at all.
 
+Model-written text that repeats 8 or more consecutive words of your code
+(bodies, comments, string literals; signatures and docstrings are allowed) is
+sent back for rewording once and cleared if it still does; set
+`[overlap] mode = "flag"` to keep it and only report it.
+
 `archdoc eval REPO --spec eval/<name>.toml --backend a,b,c` compares the
 extracted architecture with a reference diagram and the backends with each other
 (see `eval/celebrity-rec-rabbitmq.toml`).
