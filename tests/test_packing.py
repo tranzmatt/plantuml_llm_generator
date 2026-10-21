@@ -6,9 +6,9 @@ import json
 import pytest
 
 from archdoc.backends import Completion, ScriptedBackend
-from archdoc.egress import build_interface_payload, build_sequence_payload
+from archdoc.egress import build_sequence_payload
 from archdoc.extract import extract_python
-from archdoc.packing import Calibration, Window, encode, pack
+from archdoc.packing import Calibration, Window, pack
 from archdoc.plan.artifacts import plan_sequence
 from archdoc.plan.entries import call_slice
 from archdoc.policy import Config

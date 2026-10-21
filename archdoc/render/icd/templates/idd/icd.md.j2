@@ -1,0 +1,257 @@
+{#- Interface Design Description, section layout after MIL-STD-498 DI-IPSC-81436A.
+    Same facts as the lightweight template; paragraphs the code cannot answer
+    are marked TBD and listed in Appendix A. -#}
+# {{ title }}
+
+**Interface Design Description (IDD)** for `{{ repo }}`
+
+| | |
+|---|---|
+| Generated | archdoc {{ version }}{% if generated %}, {{ generated }}{% endif %} |
+| Interfaces | {{ summary.interfaces }} ({{ summary.provided }} provided, {{ summary.required }} required) |
+| Operations | {{ summary.operations }} |
+| Data element assemblies | {{ summary.data_types }} |
+
+## 1. Scope
+
+### 1.1 Identification
+
+This IDD describes the interfaces of the system `{{ repo }}` as found in its
+source code by archdoc {{ version }}{% if generated %} on {{ generated }}{% endif %}.
+
+### 1.2 System overview
+
+{% if system_overview %}
+{{ system_overview }} *(generated)*
+{% else %}
+**TBD**
+{% endif %}
+
+### 1.3 Document overview
+
+Section 3 identifies each interface and gives, for each, its type, its data
+elements, the data element assemblies it exchanges, and its communication
+methods and protocol characteristics. Tables are generated from the code and
+are authoritative for the version analysed. Text marked *(generated)* was
+drafted by a language model and should be reviewed; **TBD** marks what the
+code cannot answer, all listed in Appendix A.
+{% if coverage and coverage.known_unknowns %}
+
+**Incomplete:** {{ coverage.known_unknowns | length }} use(s) of interface
+technologies were found where no interface was extracted; see Appendix A.2.
+{% endif %}
+
+## 2. Referenced documents
+
+{% if diagrams %}
+The diagrams referenced in this document are listed in Appendix B.
+{% else %}
+None.
+{% endif %}
+
+## 3. Interface design
+
+### 3.1 Interface identification and diagrams
+
+| Project-unique identifier | Interface | Type | Direction | Owner (interfacing entity) | Protocol | Address |
+|---------------------------|-----------|------|-----------|-----------------------------|----------|---------|
+{% for i in interfaces -%}
+| [{{ i.id | code }}](#{{ i.anchor }}) | {{ i.name | code }} | {{ i.kind_label }} | {{ i.direction }} | {{ i.owner | code }} | {{ i.protocol | cell }} | {{ i.address | code }} |
+{% endfor %}
+{% for dgm in diagrams if dgm.kind in ("component", "usecase", "deployment") %}
+
+{{ dgm | figure }}
+{% endfor %}
+{% for i in interfaces %}
+{% set sec = loop.index + 1 %}
+
+<a id="{{ i.anchor }}"></a>
+### 3.{{ sec }} {{ i.name }} ({{ i.id | code }})
+
+{{ i.purpose | tbd }}{{ i | mark("purpose") }}
+
+**a. Priority.** **TBD**
+
+**b. Type of interface.** {{ i.kind_label }}, {{ i.direction }} by {{ i.owner | code }}{% if i.kind in ("http", "rpc") %}: request/response{% elif i.kind == "message" %}: asynchronous message transfer{% elif i.kind == "env" %}: configuration read at start-up{% elif i.kind == "cli" %}: command invocation{% elif i.kind == "ui" %}: interactive user interface{% endif %}.
+
+**c. Characteristics of individual data elements.**
+{% if i.kind == "env" %}
+
+| Data element | Default | Required (no default) in | Used in | Units / format | Description |
+|--------------|---------|--------------------------|---------|----------------|-------------|
+{% for op in i.operations -%}
+| <a id="{{ op.anchor }}"></a>{{ op.name | code }} | {% if op.meta.get("defaults_differ") %}differs by module{% else %}{{ op.meta.get("default") | code }}{% endif %} | {{ op.meta.get("required_in") | cell }} | {{ op.meta.get("used_in") | cell }} | **TBD** | {{ op.summary | tbd }}{{ op | mark("summary") }} |
+{% endfor %}
+{% else %}
+{% set outer = sec %}
+{% for op in i.operations %}
+
+<a id="{{ op.anchor }}"></a>
+#### 3.{{ outer }}.{{ loop.index }} {{ op.name | code }}
+
+{{ op.summary | tbd }}{{ op | mark("summary") }}
+
+{% if op.params %}
+| Data element | {% if i.kind == "http" %}In | {% endif %}Data type | Size / format, range | Required | Default | Description |
+|--------------|{% if i.kind == "http" %}----|{% endif %}-----------|----------------------|----------|---------|-------------|
+{% for p in op.params -%}
+| {{ (p.flags or p.name) | code }} | {% if i.kind == "http" %}{{ p.location | cell }} | {% endif %}{{ p.type | typecell }} | {{ p.constraints | cell }} | {{ p.required | yn }} | {{ p.default | code }} | {{ p.description | tbd }}{{ p | mark("description") }} |
+{% endfor %}
+{% else %}
+*No individual data elements.*
+{% endif %}
+{% if op.outputs %}
+
+Outputs: {% for o in op.outputs %}{{ o.name | code }} ({{ o.type | typecell }}){% if not loop.last %}, {% endif %}{% endfor %}
+
+{% endif %}
+{% endfor %}
+{% endif %}
+
+Units, accuracy, timing and frequency, and security constraints of these
+data elements cannot be determined from code: **TBD**.
+
+**d. Characteristics of data element assemblies.**
+{% set assemblies = [] %}
+{% for op in i.operations %}{% for t in (op.request, op.response) if t and t.anchor %}{% if t not in assemblies %}{% set _ = assemblies.append(t) %}{% endif %}{% endfor %}{% endfor %}
+{% if assemblies %}
+{% for t in assemblies %}
+- {{ t | typecell }} (see Section 4)
+{% endfor %}
+{% elif i.kind == "message" %}
+Each message is an assembly of the fields listed under (c).
+{% else %}
+None beyond the individual data elements.
+{% endif %}
+
+**e. Communication methods.**
+{% if i.protocol or i.address %}
+{{ i.protocol | cell }}{% if i.address %}, at {{ i.address | code }}{% endif %}.
+{% else %}
+{{ i.kind_label }}; transport **TBD**.
+{% endif %}
+
+**f. Protocol characteristics.**
+{% if i.kind == "message" %}
+
+| Operation | Role | Queue | Exchange | Routing key | Delivery | Acknowledgement | Content type |
+|-----------|------|-------|----------|-------------|----------|-----------------|--------------|
+{% for op in i.operations -%}
+| {{ op.name | code }} | {{ op.meta.get("role") | cell }} | {{ op.meta.get("queue") | code }} | {{ op.meta.get("exchange") | code }}{% if op.meta.get("exchange_type") %} ({{ op.meta.get("exchange_type") }}){% endif %} | {{ op.meta.get("routing_key") | code }} | {{ op.meta.get("delivery") | cell }} | {{ op.meta.get("ack") | cell }} | {{ op.meta.get("content_type") | cell }} |
+{% endfor %}
+{% elif i.kind == "http" %}
+
+| Operation | Handler | Request | Response | Success status | Errors |
+|-----------|---------|---------|----------|----------------|--------|
+{% for op in i.operations -%}
+| [{{ op.name | code }}](#{{ op.anchor }}) | {{ op.handler | code }} | {{ op.request | typecell }} | {{ op.response | typecell }} | {{ op.meta.get("status_code") | cell }} | {{ op.errors | cell }} |
+{% endfor %}
+
+Authentication, rate limiting and versioning: **TBD** (Appendix A).
+{% elif i.kind == "cli" %}
+
+| Command | Handler | Errors / exit status |
+|---------|---------|----------------------|
+{% for op in i.operations -%}
+| {{ op.name | code }} | {{ op.handler | code }} | {{ op.errors | cell }} |
+{% endfor %}
+{% else %}
+**TBD**
+{% endif %}
+
+**g. Other characteristics.** **TBD**
+{% set ids = i.operations | map(attribute="id") | list %}
+{% set handlers = i.operations | map(attribute="handler") | list %}
+{% for dgm in diagrams if dgm.about and (dgm.about | select("in", ids + handlers) | list) %}
+
+{{ dgm | figure }}
+{% endfor %}
+{% endfor %}
+
+## 4. Data element assemblies
+{% if not data_types %}
+
+*No structured data types are exchanged over these interfaces.*
+{% endif %}
+{% for d in data_types %}
+
+<a id="{{ d.anchor }}"></a>
+### 4.{{ loop.index }} {{ d.name }} ({{ d.source }})
+
+{{ d.description | tbd }}{{ d | mark("description") }}
+
+{% if d.source == "enum" %}
+Values: {% for f in d.fields %}{{ f.name | code }}{% if not loop.last %}, {% endif %}{% endfor %}
+
+{% else %}
+| Data element | Data type | Required | Default | Size / format, range | Description |
+|--------------|-----------|----------|---------|----------------------|-------------|
+{% for f in d.fields -%}
+| {{ f.name | code }} | {{ f.type | typecell }} | {{ f.required | yn }} | {{ f.default | code }} | {{ f.constraints | cell }} | {{ f.description | tbd }}{{ f | mark("description") }} |
+{% endfor %}
+{% endif %}
+{% endfor %}
+
+## 5. Requirements traceability
+
+**TBD**: the code does not record which requirement each interface satisfies.
+
+## 6. Notes
+
+| Term | Meaning |
+|------|---------|
+| TBD | To be determined: cannot be established from the code |
+| *(generated)* | Drafted by a language model from the code; to be reviewed |
+| *(reviewed)* | Written or approved by a reviewer (`review/review.yaml`) |
+
+<a id="appendix-a-open-items"></a>
+## Appendix A. Open items
+
+{% if gaps %}
+| # | Where | Open item |
+|--:|-------|-----------|
+{% for g in gaps -%}
+| {{ loop.index }} | {% if g.anchor %}[{{ g.where | cell }}](#{{ g.anchor }}){% else %}{{ g.where | cell }}{% endif %} | {{ g.what }} |
+{% endfor %}
+{% else %}
+None.
+{% endif %}
+{% if coverage and coverage.known_unknowns %}
+
+<a id="appendix-a2"></a>
+### A.2 Interfaces not extracted
+
+| Module | Technology | Kind | Direction |
+|--------|------------|------|-----------|
+{% for u in coverage.known_unknowns -%}
+| {{ u.module | code }} | {{ u.description }} (`{{ u.library }}`) | {{ u.kind }} | {{ u.direction }} |
+{% endfor %}
+{% endif %}
+{% if coverage and coverage.message_wiring %}
+
+### A.3 Message channels with a missing end
+
+| Channel | Issue | Modules |
+|---------|-------|---------|
+{% for w in coverage.message_wiring -%}
+| {{ w.channel | code }} | {{ w.issue | cell }} | {{ w.modules | cell }} |
+{% endfor %}
+{% endif %}
+{% if coverage and coverage.deployment %}
+
+### A.4 Deployment files that disagree with the code
+
+| File | Where | Issue |
+|------|-------|-------|
+{% for d in coverage.deployment -%}
+| {{ d.file | code }} | {{ d.where | code }} | {{ d.issue | cell }} |
+{% endfor %}
+{% endif %}
+{% if diagrams %}
+
+## Appendix B. Diagrams
+
+{% for dgm in diagrams -%}
+- [{{ dgm.title }}]({{ dgm.path }})
+{% endfor %}
+{% endif %}

@@ -119,7 +119,7 @@ need the Phase 4a packer.
 | module structure and dependencies | component diagram; dependency manifest (third-party packages and versions from requirements/pyproject) | extraction | done (4c) |
 | interaction behavior | sequence diagrams per entry point | model + verification | diagrams: done; verification: 4b |
 | algorithmic behavior | **behavior specifications** per public function: purpose, inputs, outputs, preconditions, side effects, errors, algorithm in prose | model, from source (local); trivial functions from the AST | done (4c) |
-| state behavior | state diagrams | model + verification | 4d |
+| state behavior | state diagrams | extraction (assignments and guards) | done (4d) |
 | expected behavior | **test inventory**: tests as acceptance criteria (what each test exercises and asserts) | extraction + model | done (4c) |
 | configuration and runtime | env vars, ports, entry points, deployment diagram | extraction + model | partly done |
 
@@ -582,13 +582,16 @@ supply a neutral description that is sent instead of the real name.
 | component | deterministic | module import graph by package; **provided/required interfaces** from the inventory as lollipop/socket notation; message interfaces drawn as the broker's queues/exchanges with publisher → channel → consumer arrows |
 | deployment | deterministic (compose files) | services and the modules each image contains; message flows through the broker's service. Repos without deployment files: LLM planner later (entrypoints, IO categories, env var names) |
 | flow (cross-service sequence) | deterministic | from each UI/HTTP/CLI operation: the handler's internal calls in source order to each publish, through the broker to every deployed consumer, on from each consumer's callback; fanout as `par`; a publish with no deployed consumer ends in a note naming any consumer the deployment leaves out. One per entry per deployment file. Source order, not run-time order: branches, retries and loops are not shown, and the legend says so |
-| object | LLM planner | data types with fields, constructor signatures |
-| state | LLM planner | enums, `status`/`state` fields, transition-named methods |
-| use-case | LLM planner | provided interfaces (routes, CLI commands, tasks), required interfaces as actors |
+| object | deterministic | objects created at module import (`x = Class(...)`, `with Blocks() as demo:` and what is created inside), simple constructor arguments as attribute values, links from constructor arguments, `with` nesting and module-level calls (`app.include_router(router)`, `btn.click(inputs=..., outputs=...)`). Not invented example instances |
+| state | deterministic | enum members, or string values assigned to a `status`/`state`/`phase`/`stage` attribute; a transition is an assignment, its source the state an enclosing `if` (or an early `raise`/`return`) requires, or every state when none is checked; field defaults and `__init__` are initial states; states no code assigns are listed |
+| use-case | deterministic + LLM labels | provided UI/HTTP/CLI operations as use cases with a primary actor per kind; secondary actors are the external systems each reaches (through calls and message deliveries to functions that call an outbound library), named by the hosts of URL literals in those modules. The LLM may only give goal names and clearer actor names, by id |
 | sequence | LLM planner | call graph from a chosen entrypoint or operation, depth-limited |
-| activity | LLM planner | call graph, plus control-flow skeletons if level allows |
+| activity | deterministic + LLM labels | the entry function's AST: decisions, loops, try/except, with, match, return, raise and every statement that calls something, in source order. The LLM may only replace node labels, by node id, and only where policy reaches `control_flow` |
 
-Planner output is validated JSON (Section 11), rendered by
+Wherever the code can answer, the diagram is drawn from it, and a model only
+writes wording keyed by ids the diagram already has (4d): the verification
+rules of Section 2.2 for activity and state diagrams then hold by
+construction. Planner output is validated JSON (Section 11), rendered by
 `archdoc/render/puml/<type>.py` and checked with `plantuml -syntax` when PlantUML is
 available. The existing `repair_*` functions and the PlantUML-syntax FAISS RAG are
 not used on the v2 path.
@@ -623,6 +626,23 @@ sent.
     (DI-IPSC-81436). The exact section mapping is to be confirmed against the DID
     during Phase 4.
 - **Granularity:** `--icd-scope` `interface | component | system`.
+
+*Implemented (4d):* `--template idd` lays the same ICD context out after
+DI-IPSC-81436A: 1 Scope (identification, system overview, document overview),
+2 Referenced documents, 3 Interface design (3.1 identification table with the
+component, use-case and deployment diagrams; per interface a. priority, b.
+type, c. individual data elements, d. data element assemblies, e.
+communication methods, f. protocol characteristics, g. other, followed by
+the sequence, flow and activity diagrams of its operations), 4 Data element
+assemblies, 5 Requirements traceability, 6 Notes, appendices. What code
+cannot answer (priority, units, accuracy, timing, security) is TBD. With
+`all --design`, the design description runs first and its system summary is
+the IDD's system overview. The design description has a matching `sdd`
+template after DI-IPSC-81435A (12.7). Documents embed diagrams (`--embed`
+svg, png, source or link; rendered by one PlantUML run, falling back to the
+source without PlantUML), and `--export docx,html,pdf` (or `archdoc export
+OUT --to ...`) converts them with pandoc, with PNG figures for docx and PDF.
+The AsciiDoc output format is not done.
 
 ### 10.3 Drift check
 
@@ -865,6 +885,34 @@ regenerated, or replayed from the cache), the SDD layout (4d), and checking an
 algorithm's steps against the outline (a step naming a call the function
 does not make).
 
+### 12.8 Implementation status (4d)
+
+All diagram types of Section 9 are produced; `--types` defaults to every
+type drawn from the code (class, component, deployment, flow, state, object,
+use-case, activity), plus `sequence` with an LLM. Activity diagrams cover the
+same entries as sequence diagrams (`--entry`, else the `--max-entries` with
+the largest call graphs) when they have control flow. Every new renderer was
+checked with PlantUML on every function with control flow in this repo and
+the celebrity repo (415 activity diagrams, no syntax errors). Each diagram's
+sidecar classes its structure as facts with `function:line` evidence and any
+model labels as derived.
+
+On the celebrity repo the use-case diagram finds the one UI use case and the
+three external services it reaches across four services (the image
+recognition API and two Wikipedia endpoints), and the object diagram shows
+the Gradio layout (what the Blocks container holds, which components the
+button reads and writes) and the module-level RabbitMQ connections. No state
+machine is reported there: its only `status` is a local string.
+
+The design description also has an `sdd` template (DI-IPSC-81435A): 1
+Scope, 2 Referenced documents, 3 CSCI-wide design decisions (dependencies,
+deployment diagram, declaration/use issues), 4 Architectural design (4.1
+components with component, class and object diagrams; 4.2 concept of
+execution with use-case, flow, sequence, activity and state diagrams; 4.3
+interfaces), 5 Detailed design (one software unit per module, with its
+behavior specifications), 6 Requirements traceability (the test inventory as
+acceptance criteria), 7 Notes.
+
 ## 13. Harness integration
 
 ### 13.1 Core idea
@@ -1033,6 +1081,7 @@ archdoc diagrams    <repo> --backend X [--types class,sequence]
 archdoc icd         <repo> --backend X [--scope interface] [--template idd]
 archdoc all         <repo> --backend X    # diagrams + ICDs, one extraction (--design: + design description)
 archdoc design      <repo> --backend X    # summaries, behavior specs, dependency manifest, test inventory
+archdoc export      <out> --to docx,html,pdf   # convert written documents with pandoc
 archdoc check       <repo>                # ICD drift, no LLM
 archdoc serve-mcp   --repo R --out O --trust local|cloud
 ```

@@ -20,7 +20,6 @@ from archdoc.egress import EgressLog
 from archdoc.extract import extract_python
 from archdoc.plan.artifacts import PlanContext, check_sequence, plan_narrative, plan_sequence
 from archdoc.plan.entries import call_slice, discover_entries, select_entries
-from archdoc.plan.schemas import sequence_schema
 from archdoc.policy import Config
 from archdoc.pseudonym import AliasMap
 from archdoc.render.icd import apply_narrative, build_icd_context, render_icd
@@ -386,7 +385,7 @@ def test_cli_all_with_llm(tmp_path, monkeypatch, capsys):
     assert rc == 0
     printed = capsys.readouterr().out
     assert "tier cloud" in printed
-    assert sorted(os.listdir(out / "diagrams")) == [
+    assert sorted(f for f in os.listdir(out / "diagrams") if not f.endswith((".svg", ".png"))) == [
         "sample_app_sequence_shop_api_read_item.provenance.json", "sample_app_sequence_shop_api_read_item.puml",
         "sample_app_sequence_shop_cli_cmd_serve.provenance.json", "sample_app_sequence_shop_cli_cmd_serve.puml"]
     assert (out / ".archdoc" / "alias_map.json").exists() and (out / ".archdoc" / "egress.jsonl").exists()
@@ -547,7 +546,8 @@ def test_cli_skips_llm_when_backend_does_not_answer(tmp_path, monkeypatch, capsy
     assert rc == 0
     printed = capsys.readouterr().out
     assert "[SKIP] LLM outputs: no usable backend" in printed and "api/version: timed out" in printed
-    assert sorted(os.listdir(out / "diagrams")) == ["sample_app_class.provenance.json",
+    assert sorted(f for f in os.listdir(out / "diagrams") if not f.endswith((".svg", ".png"))) == [
+        "sample_app_class.provenance.json",
                                                      "sample_app_class.puml"]   # deterministic output still written
     assert (out / "icd" / "sample_app_icd.md").exists()
 

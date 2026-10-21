@@ -189,7 +189,9 @@ def build_design_context(ir: RepoIR, ir_all: RepoIR, root: str, llm: Optional[Pl
         "title": f"{ir.repo} Design Description", "repo": ir.repo, "version": __version__,
         "generated": generated, "system": None, "packages": [], "modules": [],
         "manifest": build_manifest(root, ir).to_dict(),
-        "tests": [t.to_dict() for t in tests], "requests": [], "request_index": {},
+        "tests": [t.to_dict() for t in tests], "requests": [], "request_index": {}, "diagrams": [],
+        "interfaces": [{"id": i.id, "name": i.name, "kind": i.kind, "direction": i.direction, "owner": i.owner,
+                        "operations": len(i.operations)} for i in ir.interfaces],
         "aliased": bool(llm and llm.config.policy_for(llm.tier).pseudonymize != "off"),
     }
 
@@ -281,7 +283,7 @@ def build_design_context(ir: RepoIR, ir_all: RepoIR, root: str, llm: Optional[Pl
             by_mod.setdefault(t["module"], []).append(t)
         for mid, items in by_mod.items():
             exercised = list(dict.fromkeys(x for t in items for x in t["exercises"] if ":" in x))
-            res = plan_tests(llm, mid, [t["id"] for t in items], exercised)
+            res = plan_tests(llm, mid, [t["id"] for t in items], exercised, ir_all)
             record(f"tests:{mid}", res)
             if not res.ok:
                 say(f"[FAIL] criteria for {mid}: {'; '.join(res.errors[:2])}")

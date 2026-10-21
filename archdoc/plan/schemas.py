@@ -145,4 +145,22 @@ def group_summary_schema(parts: List[str], collaborators: List[str], external: L
 
 
 def tests_schema(tests: List[str]) -> Dict[str, Any]:
-    return _obj({"tests": {"type": "array", "items": _obj({"ref": _ref(tests), "criterion": _TEXT})}})
+    return _obj({"tests": {"type": "array", "minItems": len(tests), "maxItems": len(tests),
+                           "items": _obj({"ref": _ref(tests), "criterion": _TEXT})}})
+
+
+def activity_schema(nodes: List[str]) -> Dict[str, Any]:
+    """Labels for an activity diagram whose structure comes from the code: only
+    existing node ids can be labelled; nothing can be added or removed."""
+    return _obj({
+        "title": _TEXT,
+        "labels": _refs_array(nodes, _obj({"node": _ref(nodes), "text": _TEXT})),
+    })
+
+
+def usecase_schema(cases: List[str], actors: List[str]) -> Dict[str, Any]:
+    """Names for use cases and actors found in the code; none can be added."""
+    return _obj({
+        "actors": _refs_array(actors, _obj({"ref": _ref(actors), "name": _TEXT})),
+        "use_cases": _refs_array(cases, _obj({"ref": _ref(cases), "goal": _TEXT})),
+    })

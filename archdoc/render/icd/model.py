@@ -203,6 +203,7 @@ def build_icd_context(
         "coverage": None,                  # set by archdoc.coverage.icd_coverage after narrative
         "reviewed_items": 0,               # set by archdoc.review.apply_to_icd
         "diagrams": diagrams or [],
+        "system_overview": None,           # the design description's system summary, when it ran first
     }
 
 

@@ -59,8 +59,15 @@ Hosts on VPN/CGNAT ranges (e.g. NetBird or Tailscale 100.x addresses) must be li
 in `[trust] local_hosts` before they're accepted as local.
 
 Set `PLANTUML_JAR=/path/to/plantuml.jar` (or put `plantuml` on PATH) to
-syntax-check every generated diagram. Activity, state, use-case and object
-diagrams are not yet on this path; use the scripts below for those.
+syntax-check every generated diagram and embed rendered SVGs in the documents.
+Class, component, deployment, cross-service flow, state, object, use-case and
+activity diagrams are drawn from the code; a model, if configured, only writes
+activity and use-case labels. Sequence diagrams need a model.
+
+`--template idd` writes the ICD in a MIL-STD-498 Interface Design Description
+layout, and `--design-template sdd` the design description as a Software Design
+Description. `--export docx,html,pdf` converts the documents with pandoc
+(`archdoc export archdoc_out --to docx` does it afterwards).
 
 Every output has a `<name>.provenance.json` beside it, classing each item as
 fact (from code), derived (model, with the request it came from), open (TBD) or

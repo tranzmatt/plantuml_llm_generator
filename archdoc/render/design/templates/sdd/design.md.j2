@@ -1,0 +1,202 @@
+{#- Software Design Description, section layout after MIL-STD-498 DI-IPSC-81435A.
+    The whole repository is treated as one CSCI; each module is a software
+    unit. Same content as the lightweight template, laid out by the DID. -#}
+# {{ repo }} Software Design Description
+
+**Software Design Description (SDD)** for `{{ repo }}`
+
+| | |
+|---|---|
+| Generated | archdoc {{ version }}{% if generated %}, {{ generated }}{% endif %} |
+| Software units (modules) | {{ modules | length }} |
+| Public functions | {{ coverage.behavior.total }} ({{ coverage.behavior.total - coverage.behavior.none }} specified) |
+| Tests | {{ coverage.tests.total }} |
+
+## 1. Scope
+
+### 1.1 Identification
+
+This SDD describes the design of `{{ repo }}` as found in its source code by
+archdoc {{ version }}{% if generated %} on {{ generated }}{% endif %}. The repository is treated as one
+computer software configuration item (CSCI); each module is a software unit.
+
+### 1.2 System overview
+
+{% if system %}
+{{ system.responsibility }} *(generated)*
+{% else %}
+**TBD**
+{% endif %}
+
+### 1.3 Document overview
+
+Signatures, the dependency manifest, the test inventory and the diagrams are
+generated from the code and are authoritative for the version analysed.
+Summaries, behavior specifications and acceptance criteria marked
+*(generated)* were drafted by a language model{% if aliased %} that saw pseudonymized identifiers only{% endif %}
+and should be reviewed; each says what it was written from: *source*,
+*outline* or *signature* (behavior inferred). *(from the code)* marks
+specifications simple enough to state exactly without a model. **TBD** marks
+what is not yet specified; Appendix A lists the open items.
+
+## 2. Referenced documents
+
+- Interface Control Document / Interface Design Description for `{{ repo }}` (`../icd/`), for the interfaces summarized in 4.3.
+{% if diagrams %}
+- The diagrams embedded below (`../diagrams/`).
+{% endif %}
+
+## 3. CSCI-wide design decisions
+
+{% if system and system.external %}
+External systems and libraries the design depends on:
+{% for e in system.external %}
+- {{ e.ref | code }}{% if e.role %}: {{ e.role }}{% endif %} *(generated)*
+{% endfor %}
+
+{% endif %}
+Third-party dependencies (declared versions; see 3.1 for where declaration
+and use disagree):
+
+{% if manifest.requirements %}
+| Package | Version | Declared in | Group |
+|---------|---------|-------------|-------|
+{% for r in manifest.requirements -%}
+| {{ r.name | code }} | {{ r.spec | code }} | {{ (r.file ~ ':' ~ r.line) | code }} | {{ r.group | cell }} |
+{% endfor %}
+{% else %}
+None declared (no requirements files, `pyproject.toml`, `setup.cfg` or Dockerfile `pip install` lines).
+{% endif %}
+{% for dgm in diagrams if dgm.kind == "deployment" %}
+
+{{ dgm | figure }}
+{% endfor %}
+
+### 3.1 Dependency declarations and use
+
+{% if manifest.issues %}
+| Package | Where | Issue |
+|---------|-------|-------|
+{% for i in manifest.issues -%}
+| {{ i.package | code }} | {{ i.where | cell }} | {{ i.issue | cell }} |
+{% endfor %}
+{% else %}
+Declarations and imports agree.
+{% endif %}
+
+## 4. CSCI architectural design
+
+### 4.1 CSCI components
+
+| Software unit | File | Responsibility |
+|---------------|------|----------------|
+{% for m in modules -%}
+| [{{ m.id | code }}](#{{ m.anchor }}) | {{ m.path | code }} | {% if m.summary %}{{ m.summary.responsibility | cell }} *(generated)*{% elif m.doc %}{{ m.doc | cell }} *(docstring)*{% else %}**TBD**{% endif %} |
+{% endfor %}
+{% if packages %}
+
+Packages:
+{% for p in packages %}
+- {{ p.id | code }}{% if p.summary %}: {{ p.summary.responsibility }} *(generated)*{% endif %}
+
+{% endfor %}
+{% endif %}
+{% for dgm in diagrams if dgm.kind in ("component", "class", "object") %}
+
+{{ dgm | figure }}
+{% endfor %}
+
+### 4.2 Concept of execution
+{% set execution = diagrams | selectattr("kind", "in", ["usecase", "flow", "sequence", "activity", "state"]) | list %}
+{% if execution %}
+{% for dgm in execution %}
+
+{{ dgm | figure }}
+{% endfor %}
+{% else %}
+
+**TBD** (no use-case, flow, sequence, activity or state diagrams in this run).
+{% endif %}
+
+### 4.3 Interface design
+
+{% if interfaces %}
+| Interface | Kind | Direction | Owner | Operations |
+|-----------|------|-----------|-------|-----------:|
+{% for i in interfaces -%}
+| {{ i.name | code }} | {{ i.kind }} | {{ i.direction }} | {{ i.owner | code }} | {{ i.operations }} |
+{% endfor %}
+
+Each interface is specified in the ICD / IDD.
+{% else %}
+No interfaces were extracted.
+{% endif %}
+
+## 5. CSCI detailed design
+{% for m in modules %}
+{% set sec = loop.index %}
+
+<a id="{{ m.anchor }}"></a>
+### 5.{{ sec }} {{ m.id | code }}
+
+| | |
+|---|---|
+| File | {{ m.path | code }} |
+| Docstring | {{ m.doc | cell }} |
+| Responsibility | {% if m.summary %}{{ m.summary.responsibility | cell }} *(generated)*{% else %}**TBD**{% endif %} |
+{% if m.summary and m.summary.collaborators %}
+| Collaborators | {% for c in m.summary.collaborators %}{{ c.ref | code }}{% if c.role %} ({{ c.role | cell }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %} |
+{% endif %}
+{% if m.summary and m.summary.external %}
+| External | {% for c in m.summary.external %}{{ c.ref | code }}{% if c.role %} ({{ c.role | cell }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %} |
+{% endif %}
+{% for f in m.functions %}
+{% set h = "#### 5." ~ sec ~ "." ~ loop.index %}
+{% include "_spec.md.j2" %}
+{% endfor %}
+{% endfor %}
+
+## 6. Requirements traceability
+
+The code records no requirements. Its tests are the nearest evidence of
+intended behavior; each is listed below as an acceptance criterion, with the
+software units it exercises.
+
+{% if tests %}
+| Test | Exercises | Expects | Acceptance criterion |
+|------|-----------|---------|----------------------|
+{% for t in tests -%}
+| {{ (t.path ~ ':' ~ t.line) | code }} {{ t.name | code }}{% if t.cases %} ×{{ t.cases }}{% endif %} | {{ t.exercises | cell }} | {{ t.expects | cell }} | {% if t.criterion %}{{ t.criterion | cell }}{% if t.criterion_generated %} *(generated)*{% endif %}{% elif t.doc %}{{ t.doc | cell }} *(docstring)*{% else %}**TBD**{% endif %} |
+{% endfor %}
+{% else %}
+No tests found.
+{% endif %}
+
+## 7. Notes
+
+| Term | Meaning |
+|------|---------|
+| CSCI | The repository, as one configuration item |
+| Software unit | One Python module |
+| *(generated from source / outline)* | Written by a language model from the function's code or its control flow |
+| *(inferred from signature)* | Written from the signature, docstring and calls only |
+| *(from the code)* | Stated exactly from the code, without a model |
+| TBD | Not yet specified |
+
+## Appendix A. Coverage and open items
+
+| | |
+|---|---|
+| Behavior specifications | {{ coverage.behavior.total - coverage.behavior.none }} of {{ coverage.behavior.total }} public functions: {{ coverage.behavior.source }} from source, {{ coverage.behavior.outline }} from outline, {{ coverage.behavior.signature }} from signature only |
+| Unit summaries | {{ coverage.summaries.modules }} of {{ coverage.summaries.of }} |
+| Tests | {{ coverage.tests.total }}, {{ coverage.tests.with_criterion }} with a generated criterion |
+| Public functions exercised directly by a test | {{ coverage.tests.functions_exercised }} of {{ coverage.tests.of }} |
+| Dependency issues | {{ coverage.dependencies.issues }} |
+
+{% set open = modules | map(attribute="functions") | sum(start=[]) | rejectattr("evidence") | list %}
+{% if open %}
+Functions without a specification:
+{% for f in open %}
+- [{{ f.id | code }}](#{{ f.anchor }})
+{% endfor %}
+{% endif %}

@@ -216,3 +216,57 @@ def group_summary_prompts(aliased: bool) -> Tuple[str, str]:
 
 def tests_prompts(aliased: bool) -> Tuple[str, str]:
     return _TESTS_ROLE + "\n" + common_rules(aliased) + _DESCRIBE_RULE, _TESTS_INSTRUCTIONS
+
+
+_ACTIVITY_ROLE = """\
+You are a software architect labelling an activity diagram. Its structure
+(decisions, loops, error handling, actions) is already drawn from the code;
+you only write the labels.
+"""
+
+_ACTIVITY_INSTRUCTIONS = """\
+The input shows one function (with its source or outline when available) and
+"nodes": the diagram's labelable nodes in order, each with an "id", its
+"kind" (action, if, loop, try, with, match, return, raise; "cond" is an
+"else if" branch, "except" a handler, "case" a match case), the calls it makes
+and, where given, what it says in the code ("at").
+
+For each node you can describe, write a short label (at most about 8 words):
+- action: what the step achieves ("Decode the uploaded image"), not the call syntax
+- if / cond / loop / match: the question or the iteration in words
+  ("Item found?", "For each pending message")
+- except: the failure it handles ("Recognition failed")
+- return / raise: what is returned or which failure is reported
+Leave out nodes you cannot describe; they keep the code's own text.
+title: a short title for the activity.
+
+INPUT:
+"""
+
+
+def activity_prompts(aliased: bool) -> Tuple[str, str]:
+    return _ACTIVITY_ROLE + "\n" + common_rules(aliased) + _DESCRIBE_RULE, _ACTIVITY_INSTRUCTIONS
+
+
+_USECASE_ROLE = """\
+You are a requirements analyst naming the use cases of a system whose use-case
+diagram is already drawn from its interfaces.
+"""
+
+_USECASE_INSTRUCTIONS = """\
+The input lists the system's "use_cases" (operations it offers: UI events,
+HTTP routes, CLI commands, each with its primary actor and the external
+systems it reaches) and its "actors".
+
+Write:
+- use_cases: for each use case "ref", its goal as the actor would state it,
+  verb first, at most about 6 words ("Identify a celebrity in a photo").
+- actors: for an actor whose name you can make clearer, a better name
+  ("Web user", "Image recognition service"); leave the others out.
+
+INPUT:
+"""
+
+
+def usecase_prompts(aliased: bool) -> Tuple[str, str]:
+    return _USECASE_ROLE + "\n" + common_rules(aliased), _USECASE_INSTRUCTIONS

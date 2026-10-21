@@ -1,6 +1,5 @@
 """pika and Gradio detectors, channel wiring, and their rendering."""
 
-import json
 import os
 import re
 

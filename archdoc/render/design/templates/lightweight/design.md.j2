@@ -87,67 +87,8 @@ Key operations:
 {% endif %}
 {% for f in m.functions %}
 
-<a id="{{ f.anchor }}"></a>
-#### {{ f.name | code }}
-
-{{ f.signature | code }}
-
-{% if f.evidence %}
-{{ f.purpose | tbd }} {{ f | evidence }}
-{% if f.inputs %}
-
-| Input | Type | Description |
-|-------|------|-------------|
-{% for i in f.inputs -%}
-| {{ i.name | code }} | {{ i.type | code }} | {{ i.description | cell }} |
-{% endfor %}
-{% endif %}
-{% if f.returns %}
-
-**Returns:** {{ f.returns }}
-{% endif %}
-{% if f.preconditions %}
-
-**Preconditions:**
-{% for p in f.preconditions %}
-- {{ p }}
-{% endfor %}
-{% endif %}
-{% if f.side_effects %}
-
-**Side effects:**
-{% for s in f.side_effects %}
-- {{ s.description }} ({{ s.ref | code }})
-{% endfor %}
-{% endif %}
-{% if f.errors %}
-
-| Error | When |
-|-------|------|
-{% for e in f.errors -%}
-| {{ e.ref | code }} | {{ e.when | cell }} |
-{% endfor %}
-{% endif %}
-{% if f.algorithm %}
-
-**Algorithm:**
-{% for a in f.algorithm %}
-{{ loop.index }}. {{ a }}
-{% endfor %}
-{% endif %}
-{% else %}
-{% if f.doc %}{{ f.doc }} *(docstring)*
-
-{% endif %}
-Behavior: **TBD**
-{% if f.failed %}
-(The model's answer was rejected: {{ f.failed }})
-{% endif %}
-{% endif %}
-{% if f.tested_by %}
-
-Tested by: {% for t in f.tested_by %}{{ t | code }}{% if not loop.last %}, {% endif %}{% endfor %}
-{% endif %}
+{% set h = "####" %}
+{% include "_spec.md.j2" %}
 {% endfor %}
 {% endfor %}
 

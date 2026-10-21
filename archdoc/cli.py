@@ -19,7 +19,17 @@ from .extract import extract_python
 from .extract.python_ast import collect_python_files
 from .policy import PolicyError, load_config
 from .pseudonym import AliasMap
-from .plan.artifacts import PlanContext, check_sequence, plan_narrative, plan_sequence
+from .plan.artifacts import (
+    PlanContext, check_sequence, plan_activity, plan_narrative, plan_sequence, plan_usecase,
+)
+from .activity import build_activity, has_control_flow
+from .objects import build_objects
+from .states import state_machines
+from .usecases import build_usecases
+from .render.puml.activity import render_activity_diagram
+from .render.puml.object_ import render_object_diagram
+from .render.puml.state import render_state_diagram
+from .render.puml.usecase import render_usecase_diagram
 from .plan.verify import verify_sequence
 from .plan.entries import Entry, call_slice, discover_entries, select_entries
 from .render.icd import anchor, apply_narrative, build_icd_context, inventory_snapshot, render_icd
@@ -29,6 +39,7 @@ from .overlap import SourceIndex
 from .packing import Calibration
 from .review import Review, apply_to_icd, icd_evidence, offer_icd, sequence_evidence
 from .cache import ResponseCache
+from .export import EMBED_MODES, EXPORT_FORMATS, export as export_document, figures, render_images
 from .design import DesignOptions, build_design_context, coverage_lines as design_coverage_lines, design_items
 from .render.design import render_design
 from .testsuite import inventory_excludes
@@ -131,9 +142,10 @@ def cmd_egress(args: argparse.Namespace) -> int:
     return 0
 
 
-DETERMINISTIC_DIAGRAMS = ("class", "component", "deployment", "flow")
+DETERMINISTIC_DIAGRAMS = ("class", "component", "deployment", "flow", "state", "object", "usecase", "activity")
 PLANNED_DIAGRAMS = ("sequence",)
-LLM_DIAGRAMS = PLANNED_DIAGRAMS + ("activity", "state", "usecase", "object")
+LLM_DIAGRAMS = PLANNED_DIAGRAMS
+LABELLED_DIAGRAMS = ("activity", "usecase")      # drawn from the code; an LLM, if any, only writes labels
 DEFAULT_URLS = {"ollama": "http://localhost:11434"}
 
 
@@ -365,6 +377,92 @@ def _diagram_files(ir, types, depth, max_classes, members):
     return out
 
 
+def _slug(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")
+
+
+def _code_behavior_files(ir, args, types, llm):
+    """State, object, use-case and activity diagrams: drawn from the code. For
+    activity and use-case diagrams an LLM, when there is one and policy allows,
+    only replaces labels, keyed by node or use-case id."""
+    out = []
+    root = args.repo
+    if "state" in types:
+        for m in state_machines(root, ir):
+            stem = f"{ir.repo}_state_{_slug(m.key)}"
+            items = [{"id": f"initial[{i}]", "class": "fact", "what": f"[*] -> {s}", "evidence": [w]}
+                     for i, (s, w) in enumerate(m.initial)]
+            items += [{"id": f"transition[{i}]", "class": "fact", "what": f"{t.src or '*'} -> {t.dst}",
+                       "evidence": [f"{t.function}:{t.line}"]} for i, t in enumerate(m.transitions)]
+            out.append((stem, f"{ir.repo}: states of {m.name}", render_state_diagram(m, stem), "",
+                        {"producer": "deterministic", "items": items,
+                         "extra": {"machine": m.key, "unreached": m.unreached}}))
+    if "object" in types:
+        model = build_objects(root, ir)
+        if model.objects:
+            stem = f"{ir.repo}_object"
+            items = [{"id": f"object:{o.key}", "class": "fact", "evidence": [f"{o.module}:{o.line}"]}
+                     for o in model.objects]
+            out.append((stem, f"{ir.repo}: objects created at import", render_object_diagram(
+                model, stem, title=f"{ir.repo}: objects created when the modules are imported"), "",
+                {"producer": "deterministic", "items": items}))
+    if "usecase" in types:
+        model = build_usecases(root, ir)
+        if model is not None:
+            stem = f"{ir.repo}_usecase"
+            goals, names, requests, note = {}, {}, [], ""
+            items = [{"id": f"usecase:{c.id}", "class": "fact", "evidence": [c.id] + c.via} for c in model.cases]
+            if llm is not None:
+                res = plan_usecase(llm, model)
+                requests.append(provenance.request_record(res, llm))
+                if res.ok:
+                    goals = {c["ref"]: c["goal"] for c in res.plan["use_cases"] if c["goal"]}
+                    names = {a["ref"]: a["name"] for a in res.plan["actors"] if a["name"]}
+                    items += [{"id": f"goal:{k}", "class": "derived", "request": 0, "evidence": [k]} for k in goals]
+                    note = f"(labels: {res.attempts} attempt(s))"
+                else:
+                    print(f"  [WARN] {stem}: labels: {'; '.join(res.errors[:2])}")
+            out.append((stem, f"{ir.repo}: use cases", render_usecase_diagram(model, stem, goals=goals,
+                                                                                actor_names=names), note,
+                        {"producer": "deterministic + llm" if goals else "deterministic", "items": items,
+                         "requests": requests}))
+    if "activity" in types:
+        try:
+            entries = select_entries(ir, args.entry, args.max_entries, args.depth, args.max_nodes)
+        except ValueError as exc:
+            raise PolicyError(str(exc)) from None
+        for e in entries:
+            act = build_activity(root, ir, e.handler)
+            if act is None or not has_control_flow(act):
+                continue
+            stem = f"{ir.repo}_activity_{_slug(e.handler)}"
+            title = f"{e.via[0].name}: {e.via[1].name}" if e.via else e.label
+            labels, requests, note = {}, [], ""
+            items = [{"id": f"node:{x.id}", "class": "fact", "what": getattr(x, "kind", ""),
+                      "evidence": [f"{e.handler}:{x.line}"]} for x in act.labelable()]
+            res = None
+            if llm is not None:
+                try:
+                    res = plan_activity(llm, act)
+                except EgressAborted:
+                    pass                     # policy does not allow control flow for this module: code labels
+            if res is not None:
+                requests.append(provenance.request_record(res, llm))
+                if res.ok:
+                    labels = {x["node"]: x["text"] for x in res.plan["labels"] if x["text"]}
+                    items += [{"id": f"label:{k}", "class": "derived", "request": 0, "evidence": [e.handler]}
+                              for k in labels]
+                    title = res.plan["title"] or title
+                    note = f"(labels: {res.attempts} attempt(s))"
+                else:
+                    print(f"  [WARN] {stem}: labels: {'; '.join(res.errors[:2])}")
+            out.append((stem, f"{ir.repo}: activity of {e.label}",
+                        render_activity_diagram(act, stem, title=title, labels=labels), note,
+                        {"producer": "deterministic + llm" if labels else "deterministic", "items": items,
+                         "requests": requests, "extra": {"function": e.handler}}))
+    return out
+
+
 def _prov_header(args, ir) -> dict:
     """Run header shared by every sidecar of one invocation."""
     if getattr(args, "_prov", None) is None:
@@ -377,9 +475,6 @@ def _generate_diagrams(ir, args, llm=None) -> list:
     unknown = [t for t in types if t not in DETERMINISTIC_DIAGRAMS + LLM_DIAGRAMS]
     if unknown:
         raise PolicyError(f"unknown diagram type(s): {', '.join(unknown)}")
-    later = [t for t in types if t in LLM_DIAGRAMS and t not in PLANNED_DIAGRAMS]
-    if later:
-        print(f"  [SKIP] {', '.join(later)}: not implemented yet")
     planned = [t for t in types if t in PLANNED_DIAGRAMS]
     review = Review(args.output)
     reviewed_seq = any(k.startswith("sequence:") and review.decided(k) for k in review.items)
@@ -387,6 +482,7 @@ def _generate_diagrams(ir, args, llm=None) -> list:
         print(f"  [SKIP] {', '.join(planned)}: needs an LLM (--backend NAME or --model MODEL)"
               + (" except reviewed sequence diagrams" if reviewed_seq else ""))
     files = _diagram_files(ir, types, args.component_depth, args.max_classes, args.members)
+    files += _code_behavior_files(ir, args, types, llm)
     if "sequence" in planned and (llm is not None or reviewed_seq):
         files += _sequence_files(ir, args, llm, review)
         _save_review(review)
@@ -405,9 +501,27 @@ def _generate_diagrams(ir, args, llm=None) -> list:
             status = "  syntax OK" if res.ok else f"  SYNTAX ERROR line {res.line}: {res.message}"
             failures += not res.ok
         print(f"  wrote {path}{status}{'  ' + note if note else ''}")
-        written.append({"title": title, "path": path})
+        extra = prov.get("extra", {})
+        about = [x for x in (extra.get("entry"), extra.get("function")) if x]
+        written.append({"title": title, "path": path, "kind": stem[len(ir.repo) + 1:].split("_")[0],
+                        "about": about})
     if not validate and not args.no_validate:
         print("  (PlantUML not found: set PLANTUML_JAR or put `plantuml` on PATH to syntax-check)")
+    embed = getattr(args, "embed", "link")
+    fmts = {embed} if embed in ("svg", "png") else set()
+    if getattr(args, "export", None) and set(args.export.split(",")) & {"docx", "pdf"}:
+        fmts.add("png")                              # Word and LaTeX take PNG, not SVG
+    images: dict = {}
+    for fmt in sorted(fmts):
+        if plantuml_command() is None:
+            print(f"  [SKIP] {fmt} images: PlantUML not found; documents embed the diagram source instead")
+            break
+        rendered = render_images([d["path"] for d in written], fmt)
+        if fmt == embed:
+            images = rendered
+        print(f"  rendered {len(rendered)} {fmt} image(s)")
+    for d in written:
+        d["image_path"] = images.get(d["path"])
     if failures:
         raise SystemExit(f"{failures} diagram(s) failed PlantUML syntax check")
     return written
@@ -442,9 +556,16 @@ def _narrate(llm, ctx, ifaces) -> None:
             print(f"  [FAIL] narrative for {iface.name}: {'; '.join(result.errors[:3])}")
 
 
-def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
+def _doc_figures(diagrams, doc_dir, args):
+    images = {d["path"]: d.get("image_path") for d in diagrams or [] if d.get("image_path")}
+    return figures(diagrams or [], doc_dir, getattr(args, "embed", "link"), images)
+
+
+def _generate_icd(ir, args, diagrams=None, llm=None, overview=None) -> list:
+    """Writes the ICD(s); returns their paths."""
     icd_dir = os.path.join(args.output, "icd")
-    links = [{"title": d["title"], "path": os.path.relpath(d["path"], icd_dir)} for d in (diagrams or [])]
+    links = _doc_figures(diagrams, icd_dir, args)
+    written = []
     generated = None if args.no_date else __import__("datetime").date.today().isoformat()
     if args.narrative and llm is None:
         print("  [SKIP] narrative: needs an LLM (--backend NAME or --model MODEL)")
@@ -453,6 +574,7 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
     evidence = icd_evidence(ir)
     if args.scope == "system":
         ctx = build_icd_context(ir, diagrams=links, generated=generated)
+        ctx["system_overview"] = overview
         apply_to_icd(ctx, review, evidence)
         if narrate:
             ctx["narrative_aliased"] = llm.config.policy_for(llm.tier).pseudonymize != "off"
@@ -461,6 +583,7 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
         ctx["coverage"] = icd_coverage(ctx, ir)
         _write(os.path.join(args.output, "coverage.json"), json.dumps(ctx["coverage"], indent=1))
         path = _write(os.path.join(icd_dir, f"{ir.repo}_icd.md"), render_icd(ctx, args.template))
+        written.append(path)
         _icd_sidecar(args, ir, ctx, path, llm if narrate else None)
         print(f"  wrote {path}  ({ctx['summary']['interfaces']} interfaces, "
               f"{ctx['summary']['operations']} operations, {len(ctx['gaps'])} open items)")
@@ -470,6 +593,7 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
         for iface in ir.interfaces:
             ctx = build_icd_context(ir, [iface], title=f"{iface.name} Interface Control Document",
                                     diagrams=links, generated=generated)
+            ctx["system_overview"] = overview
             apply_to_icd(ctx, review, evidence)
             if narrate:
                 ctx["narrative_aliased"] = llm.config.policy_for(llm.tier).pseudonymize != "off"
@@ -477,12 +601,14 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
             offer_icd(ctx, review, evidence)
             ctx["coverage"] = icd_coverage(ctx, ir)
             path = _write(os.path.join(icd_dir, f"{anchor(iface.id)}.md"), render_icd(ctx, args.template))
+            written.append(path)
             _icd_sidecar(args, ir, ctx, path, llm if narrate else None)
             print(f"  wrote {path}")
     _save_review(review)
     snap = os.path.join(_state_dir(args.output), "icd_snapshot.json")
     with open(snap, "w", encoding="utf-8") as fh:
         json.dump(inventory_snapshot(ir), fh, indent=1)
+    return written
 
 
 def _save_review(review) -> None:
@@ -529,7 +655,7 @@ def cmd_icd(args: argparse.Namespace) -> int:
         return 0
     llm = _llm_context(args, cfg, ir)
     try:
-        _generate_icd(ir, args, llm=llm)
+        _export(_generate_icd(ir, args, llm=llm), args)
     finally:
         _finish_llm(llm)
     return 0
@@ -541,17 +667,21 @@ def cmd_all(args: argparse.Namespace) -> int:
     llm = _llm_context(args, cfg, ir)
     try:
         diagrams = _generate_diagrams(ir, args, llm)
+        docs, overview = [], None
+        if args.design:                      # first: its system summary is the IDD's system overview
+            path, overview = _generate_design(ir, args, cfg, llm, diagrams)
+            docs.append(path)
         if ir.interfaces:
-            _generate_icd(ir, args, diagrams, llm)
-        if args.design:
-            _generate_design(ir, args, cfg, llm)
+            docs = _generate_icd(ir, args, diagrams, llm, overview) + docs
+        _export(docs, args)
     finally:
         _finish_llm(llm)
     return 0
 
 
-def _generate_design(ir, args, cfg, llm=None) -> None:
-    """Design description: summaries, behavior specifications, dependencies, tests."""
+def _generate_design(ir, args, cfg, llm=None, diagrams=None):
+    """Design description: summaries, behavior specifications, dependencies, tests.
+    Returns (path, the system summary's text or None)."""
     ir_all = extract_python(args.repo, exclude=inventory_excludes(cfg.exclude + args.exclude))
     if llm is None:
         print("  [SKIP] summaries, behavior specifications, test criteria: need an LLM "
@@ -560,6 +690,7 @@ def _generate_design(ir, args, cfg, llm=None) -> None:
                          tests=not args.no_criteria, only=args.only, max_functions=args.max_functions)
     generated = None if args.no_date else __import__("datetime").date.today().isoformat()
     ctx = build_design_context(ir, ir_all, args.repo, llm, opts, generated, say=lambda s: print(f"  {s}"))
+    ctx["diagrams"] = _doc_figures(diagrams, os.path.join(args.output, "design"), args)
     path = _write(os.path.join(args.output, "design", f"{ir.repo}_design.md"),
                   render_design(ctx, args.design_template))
     extra = {"llm": provenance.llm_header(llm)} if llm is not None else {}
@@ -573,6 +704,21 @@ def _generate_design(ir, args, cfg, llm=None) -> None:
     print(f"  wrote {path}")
     for line in design_coverage_lines(ctx["coverage"]):
         print(f"  {line}")
+    return path, (ctx["system"] or {}).get("responsibility")
+
+
+def _export(paths, args) -> None:
+    fmts = [f.strip() for f in (getattr(args, "export", None) or "").split(",") if f.strip()]
+    bad = [f for f in fmts if f not in EXPORT_FORMATS]
+    if bad:
+        raise PolicyError(f"unknown export format(s): {', '.join(bad)} (use {', '.join(EXPORT_FORMATS)})")
+    for fmt in fmts:
+        for p in paths:
+            try:
+                print(f"  exported {export_document(p, fmt, png=fmt in ('docx', 'pdf'))}")
+            except RuntimeError as exc:
+                print(f"  [SKIP] {fmt} export of {os.path.basename(p)}: {exc}")
+                break
 
 
 def cmd_design(args: argparse.Namespace) -> int:
@@ -580,9 +726,30 @@ def cmd_design(args: argparse.Namespace) -> int:
     ir = extract_python(args.repo, exclude=cfg.exclude + args.exclude)
     llm = _llm_context(args, cfg, ir)
     try:
-        _generate_design(ir, args, cfg, llm)
+        path, _ = _generate_design(ir, args, cfg, llm)
+        _export([path], args)
     finally:
         _finish_llm(llm)
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export every ICD and design description already in an output directory."""
+    docs = []
+    for sub in ("icd", "design"):
+        d = os.path.join(args.output, sub)
+        if os.path.isdir(d):
+            docs += sorted(os.path.join(d, f) for f in os.listdir(d) if f.endswith(".md"))
+    if not docs:
+        print(f"{args.output}: no documents found (icd/*.md, design/*.md)")
+        return 1
+    if set(args.to.split(",")) & {"docx", "pdf"}:
+        pumls = sorted(os.path.join(args.output, "diagrams", f) for f in os.listdir(
+            os.path.join(args.output, "diagrams")) if f.endswith(".puml")) if os.path.isdir(
+            os.path.join(args.output, "diagrams")) else []
+        if pumls and plantuml_command() is not None:
+            render_images(pumls, "png")
+    _export(docs, SimpleNamespace(export=args.to))
     return 0
 
 
@@ -671,8 +838,10 @@ def _add_llm_opts(p: argparse.ArgumentParser) -> None:
 
 
 def _add_diagram_opts(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--types", default="class,component,deployment,flow",
-                   help="Comma-separated: class, component, deployment, flow (no LLM); sequence (LLM)")
+    p.add_argument("--types", default="class,component,deployment,flow,state,object,usecase,activity",
+                   help="Comma-separated: class, component, deployment, flow, state, object, usecase, "
+                        "activity (from the code; an LLM only labels activity and use-case diagrams); "
+                        "sequence (LLM)")
     p.add_argument("--component-depth", type=int, help="Package depth for components (default: auto)")
     p.add_argument("--max-classes", type=int, default=60,
                    help="Above this many classes, write one class diagram per component")
@@ -686,6 +855,15 @@ def _add_icd_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--template", default="lightweight", help="Bundled template name or path to a .j2 file")
     p.add_argument("--no-date", action="store_true", help="Omit the generation date (reproducible output)")
     p.add_argument("--narrative", action="store_true", help="Fill TBD descriptions with the LLM")
+
+
+def _add_doc_opts(p: argparse.ArgumentParser) -> None:
+    g = p.add_argument_group("documents")
+    g.add_argument("--embed", choices=EMBED_MODES, default="svg",
+                   help="How documents include diagrams: rendered svg/png (needs PlantUML; falls back to "
+                        "the source), the PlantUML source, or a link")
+    g.add_argument("--export", metavar="FORMATS",
+                   help=f"Also convert the documents with pandoc: comma-separated {', '.join(EXPORT_FORMATS)}")
 
 
 def _add_design_opts(p: argparse.ArgumentParser, flag: bool = False) -> None:
@@ -738,6 +916,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p)
     _add_icd_opts(p)
     _add_llm_opts(p)
+    _add_doc_opts(p)
     p.set_defaults(func=cmd_icd)
 
     p = sub.add_parser("all", help="Diagrams and ICDs (and with --design, the design description)")
@@ -746,14 +925,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_icd_opts(p)
     _add_llm_opts(p)
     _add_design_opts(p, flag=True)
+    _add_doc_opts(p)
     p.set_defaults(func=cmd_all)
 
     p = sub.add_parser("design", help="Design description: summaries, behavior specs, dependencies, tests")
     _add_common(p)
     _add_llm_opts(p)
     _add_design_opts(p)
+    _add_doc_opts(p)
     p.add_argument("--no-date", action="store_true", help="Omit the generation date (reproducible output)")
     p.set_defaults(func=cmd_design)
+
+    p = sub.add_parser("export", help="Convert the documents in an output directory with pandoc")
+    p.add_argument("output", nargs="?", default="archdoc_out", help="archdoc output directory")
+    p.add_argument("--to", default="docx", help=f"Comma-separated: {', '.join(EXPORT_FORMATS)}")
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("eval", help="Evaluate accuracy against a reference and compare backends")
     _add_common(p)

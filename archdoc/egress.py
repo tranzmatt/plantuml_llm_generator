@@ -842,6 +842,76 @@ def build_tests_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap
     return _finish(b, data, tier, f"tests:{mid}", {"tests": seen})
 
 
+def _resolve_written(fn: Function, written: str) -> Optional[str]:
+    """A call as written (`self.repo.get`) to the call id the extractor resolved, if any."""
+    tail = written.rsplit(".", 1)[-1]
+    for c in fn.calls:
+        if re.split(r"[.:]", c)[-1] == tail:
+            return c
+    return None
+
+
+def build_activity_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap, act,
+                           detail: Optional[Dict[str, str]] = None, root: Optional[str] = None) -> Payload:
+    """One function's activity nodes (archdoc.activity) for labelling. Needs the
+    module's policy to reach `control_flow`: the nodes are its control flow.
+    Locally each node carries its deterministic text (the condition or calls as
+    written); aliased, only its kind and the resolved calls."""
+    b = _builder(ir, config, tier, aliases, detail, root)
+    fid = act.function
+    mid = b.owner_module(fid)
+    if not b.pol(mid).level_at_least("control_flow"):
+        raise EgressAborted([("policy", f"level={b.pol(mid).level} does not allow control flow")])
+    fn = ir.find_function(fid)
+    fv = b.function_view(fn, mid, is_method=participant_of(fid) != mid)
+    fv.pop("decorators", None)
+    nodes = []
+    for item in act.labelable():
+        nv: Dict[str, Any] = {"id": item.id, "kind": getattr(item, "kind", "")}
+        refs = [r for r in (_resolve_written(fn, w) for w in getattr(item, "calls", [])) if r]
+        if refs:
+            nv["calls"] = [b.symbol_ref(r, mid) for r in dict.fromkeys(refs)]
+        if not b._aliased(mid) and item.text:
+            nv["at"] = b._emit(item.text, mid, fid)
+        nodes.append(nv)
+    data = {"functions": [fv], "nodes": nodes}
+    return _finish(b, data, tier, f"activity:{fid}", {"nodes": [n["id"] for n in nodes]})
+
+
+def build_usecase_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap, model,
+                          repo_map: Optional[List[Dict[str, Any]]] = None) -> Payload:
+    """The use cases (operations as the ICD shows them) and actors of archdoc.usecases, for naming."""
+    b = _ViewBuilder(ir, config, tier, aliases)
+    ops = {o.id: (i, o) for i in ir.interfaces for o in i.operations}
+    cases, actors = [], []
+    for c in model.cases:
+        iface, op = ops[c.id]
+        mid = iface.owner if iface.owner in b.module_ids else None
+        ov = b.op_view(iface, op, mid)
+        cv: Dict[str, Any] = {"ref": ov["ref"], "interface": iface.kind}
+        for k in ("name", "doc", "params"):
+            if k in ov:
+                cv[k] = ov[k]
+        if op.handler:
+            fn = ir.find_function(op.handler)
+            doc = b.prose(fn.docstring, b.owner_module(op.handler), op.handler) if fn else None
+            if doc:
+                cv["handler_doc"] = doc
+        cv["actor"] = c.actor
+        if c.reaches:
+            cv["reaches"] = c.reaches
+        cases.append(cv)
+    shown = {}
+    for a in model.actors:
+        name = a.name if a.primary or not a.source.startswith("ext:") else b.literal(a.name, None, a.key)
+        shown[a.key] = name
+        actors.append({"ref": a.key, "kind": "primary" if a.primary else "external system",
+                       **({"name": name} if name else {})})
+    data = _with_map({"system": b.repo_name(), "actors": actors, "use_cases": cases}, repo_map)
+    return _finish(b, data, tier, "usecase", {"cases": [c["ref"] for c in cases],
+                                              "actors": [a["ref"] for a in actors]})
+
+
 def build_payload(
     ir: RepoIR,
     config: Config,

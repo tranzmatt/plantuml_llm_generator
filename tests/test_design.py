@@ -35,15 +35,17 @@ def ir():
     return extract_python(FIXTURE)
 
 
-def auto_answer(schema, text="does the thing"):
-    """The smallest valid answer to any planner schema: first enum value, one item per array."""
+def auto_answer(schema, text="does the thing", i=0):
+    """The smallest valid answer to any planner schema: one item per array (or
+    minItems, each with the next enum value)."""
     t = schema.get("type")
     if "enum" in schema:
-        return schema["enum"][0]
+        return schema["enum"][min(i, len(schema["enum"]) - 1)]
     if t == "object":
-        return {k: auto_answer(v, text) for k, v in schema["properties"].items()}
+        return {k: auto_answer(v, text, i) for k, v in schema["properties"].items()}
     if t == "array":
-        return [] if schema.get("maxItems") == 0 else [auto_answer(schema["items"], text)]
+        n = 0 if schema.get("maxItems") == 0 else max(1, schema.get("minItems", 1))
+        return [auto_answer(schema["items"], text, j) for j in range(n)]
     if t == "boolean":
         return False
     if t == "integer":
@@ -278,6 +280,21 @@ def test_inventory_from_excluded_tests(tmp_path):
     get = next(f for m in ctx["modules"] for f in m["functions"] if f["id"] == "shop.repo:ItemRepo.get")
     assert get["tested_by"] == ["tests.test_repo:test_get_missing"]
     assert ctx["coverage"]["tests"]["functions_exercised"] >= 1
+
+    # criteria: the tests are sent (from the full IR) though the documents exclude them
+    llm = _ctx(documented, root=root)
+    out = build_design_context(documented, ir_all, root, llm, DesignOptions(behavior=False, summaries=False))
+    sent = _payload_text(llm.backend.calls[0])
+    assert "pytest.raises(KeyError)" in sent and "def test_ok(self)" in sent
+    assert {t["name"]: t["criterion"] for t in out["tests"]} == {"test_get_missing": "does the thing",
+                                                                 "test_ok": "does the thing"}
+    assert out["coverage"]["tests"]["with_criterion"] == 2
+
+
+def test_criteria_must_cover_every_test(ir):
+    from archdoc.plan.artifacts import check_tests
+    plan = {"tests": [{"ref": "m:test_a", "criterion": "x"}]}
+    assert check_tests(plan, ["m:test_a", "m:test_b"]) == ["no criterion for: m:test_b"]
 
 
 # -- document ---------------------------------------------------------------------------------

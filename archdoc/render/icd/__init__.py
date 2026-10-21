@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 import jinja2
 
+from ...export import figure_markdown
 from .model import anchor, apply_narrative, build_icd_context, inventory_snapshot
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
@@ -68,7 +69,8 @@ def environment(template_dir: str = TEMPLATE_DIR) -> jinja2.Environment:
         undefined=jinja2.StrictUndefined,
         autoescape=False,
     )
-    env.filters.update(cell=_cell, code=_code, tbd=_tbd, yn=_yn, typecell=_typecell, mark=_mark)
+    env.filters.update(cell=_cell, code=_code, tbd=_tbd, yn=_yn, typecell=_typecell, mark=_mark,
+                       figure=figure_markdown)
     return env
 
 

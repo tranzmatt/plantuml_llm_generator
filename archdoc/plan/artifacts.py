@@ -9,8 +9,8 @@ from typing import Any, Dict, List, Optional
 from ..backends import LLMBackend
 from ..cache import ResponseCache
 from ..egress import (
-    EgressLog, build_function_payload, build_group_payload, build_interface_payload, build_module_payload,
-    build_repo_map, build_sequence_payload, build_tests_payload,
+    EgressLog, build_activity_payload, build_function_payload, build_group_payload, build_interface_payload, build_module_payload,
+    build_repo_map, build_sequence_payload, build_tests_payload, build_usecase_payload,
 )
 from ..interfaces import Interface
 from ..ir import RepoIR
@@ -26,8 +26,8 @@ from .entries import Entry, call_slice
 from .planner import PlanResult, run_plan
 from .verify import prune_sequence, verify_sequence
 from .schemas import (
-    CLIENT, behavior_schema, group_summary_schema, module_summary_schema, narrative_schema, outline,
-    sequence_schema, tests_schema,
+    CLIENT, activity_schema, behavior_schema, group_summary_schema, module_summary_schema, narrative_schema, outline,
+    sequence_schema, tests_schema, usecase_schema,
 )
 
 
@@ -352,6 +352,45 @@ def plan_narrative(ctx: PlanContext, iface: Interface) -> PlanResult:
                         what="the interface")
 
 
+def check_activity(plan: Any) -> List[str]:
+    _dedupe(plan["labels"], "node")
+    for lab in plan["labels"]:
+        lab["text"] = " ".join(lab["text"].split())[:80]
+    return []
+
+
+def plan_activity(ctx: PlanContext, act) -> PlanResult:
+    """Labels for an activity diagram drawn from the code (archdoc.activity)."""
+    fid = act.function
+    ranked = [fid]
+
+    def build(detail: Dict[str, str]):
+        return build_activity_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, act, detail=detail,
+                                      root=ctx.root)
+
+    return _plan_packed(ctx, build, ranked, lambda a: activity_schema(a["nodes"]), prompts.activity_prompts,
+                        check_activity, what="the function")
+
+
+def check_usecase(plan: Any) -> List[str]:
+    _dedupe(plan["use_cases"], "ref")
+    _dedupe(plan["actors"], "ref")
+    for c in plan["use_cases"]:
+        c["goal"] = " ".join(c["goal"].split())[:70]
+    return []
+
+
+def plan_usecase(ctx: PlanContext, model) -> PlanResult:
+    """Goal names for the use cases and clearer actor names (archdoc.usecases)."""
+    repo_map = _repo_map(ctx)
+
+    def build(detail: Dict[str, str]):
+        return build_usecase_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, model, repo_map=repo_map)
+
+    return _plan_packed(ctx, build, [], lambda a: usecase_schema(a["cases"], a["actors"]), prompts.usecase_prompts,
+                        check_usecase, what="the use cases")
+
+
 # -- rebuild content (4c) ---------------------------------------------------------------
 
 def _dedupe(items: List[Dict[str, Any]], key: str) -> None:
@@ -444,21 +483,28 @@ def plan_group_summary(ctx: PlanContext, group: str, parts: List[Any], collabora
                         what="the package" if group else "the system")
 
 
-def check_tests(plan: Any) -> List[str]:
+def check_tests(plan: Any, expected: Optional[List[str]] = None) -> List[str]:
     _dedupe(plan["tests"], "ref")
-    return []
+    missing = [t for t in (expected or []) if t not in {x["ref"] for x in plan["tests"]}]
+    return [f"no criterion for: {', '.join(missing)}"] if missing else []
 
 
-def plan_tests(ctx: PlanContext, mid: str, test_ids: List[str], exercised: List[str]) -> PlanResult:
+def plan_tests(ctx: PlanContext, mid: str, test_ids: List[str], exercised: List[str],
+               ir_all: Optional[RepoIR] = None) -> PlanResult:
+    """Acceptance criteria for one test module. Tests live in `ir_all` (the repo
+    including its tests), which the documented IR may exclude."""
+    ir = ir_all or ctx.ir
+
     def build(detail: Dict[str, str]):
-        return build_tests_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, mid, test_ids, exercised,
+        return build_tests_payload(ir, ctx.config, ctx.tier, ctx.aliases, mid, test_ids, exercised,
                                    detail=detail, root=ctx.root)
 
-    return _plan_packed(ctx, build, test_ids, lambda a: tests_schema(a["tests"]), prompts.tests_prompts,
-                        check_tests, what="the test module")
+    real = [t for t in test_ids if ir.find_function(t)]
+    return _plan_packed(ctx, build, real, lambda a: tests_schema(a["tests"]), prompts.tests_prompts,
+                        lambda plan: check_tests(plan, real), what="the test module")
 
 
-__all__ = ["CLIENT", "PlanContext", "check_behavior", "check_narrative", "check_sequence", "check_summary",
+__all__ = ["CLIENT", "PlanContext", "check_activity", "check_behavior", "check_narrative", "check_sequence", "check_summary",
            "check_tests", "drop_unused_participants", "fix_reply_flags", "keep_grounded_labels",
-           "plan_behavior", "plan_group_summary", "plan_module_summary", "plan_narrative", "plan_sequence",
-           "plan_tests"]
+           "check_usecase", "plan_activity", "plan_behavior", "plan_group_summary", "plan_module_summary", "plan_narrative", "plan_sequence",
+           "plan_tests", "plan_usecase"]
