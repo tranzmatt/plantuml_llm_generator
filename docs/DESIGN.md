@@ -72,6 +72,24 @@ every derived statement it records:
 A reviewer can therefore tell, for any sentence, whether the model read the
 actual code or only a signature.
 
+*Implemented (4b):* sidecars beside every diagram and ICD, schema
+`archdoc.provenance/1`. The header has the tool version, the analysed repo's git
+commit and dirty flag, the IR hash, and the creation time (omitted with
+`--no-date`, so deterministic sidecars are byte-identical across runs). Items:
+- deterministic diagrams: one `fact` item listing the IR ids drawn
+- flow diagrams: one `fact` per step, citing its operation id
+- sequence diagrams: one `derived`, `verified` item per message and group;
+  the evidence is the called function and its callers in the slice, and the
+  label is `fact` when it falls back to the function name
+- ICDs: every purpose, summary, parameter and field slot as fact, derived or open
+
+Each model request is recorded once: backend, model, Ollama digest, tier, policy
+detail level, aliased or not, payload and prompt hashes, the real ids shown
+(aliases resolved), attempts, tokens, warnings. Derived items point at their
+request. *Not yet:* evidence the model cites per statement (it is derived from
+verification and from what was shown), and per-item detail levels, which
+need the Phase 4a packer.
+
 ### 2.2 Grounding and verification
 
 - **Evidence is mandatory.** Every model-written statement carries an `evidence`

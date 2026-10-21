@@ -357,13 +357,35 @@ def test_cli_all_with_llm(tmp_path, monkeypatch, capsys):
     assert rc == 0
     printed = capsys.readouterr().out
     assert "tier cloud" in printed
-    assert sorted(os.listdir(out / "diagrams")) == ["sample_app_sequence_shop_api_read_item.puml",
-                                                     "sample_app_sequence_shop_cli_cmd_serve.puml"]
+    assert sorted(os.listdir(out / "diagrams")) == [
+        "sample_app_sequence_shop_api_read_item.provenance.json", "sample_app_sequence_shop_api_read_item.puml",
+        "sample_app_sequence_shop_cli_cmd_serve.provenance.json", "sample_app_sequence_shop_cli_cmd_serve.puml"]
     assert (out / ".archdoc" / "alias_map.json").exists() and (out / ".archdoc" / "egress.jsonl").exists()
     assert len(os.listdir(out / ".archdoc" / "plans")) == 2
     seq = (out / "diagrams" / "sample_app_sequence_shop_cli_cmd_serve.puml").read_text()
     assert "then build_repo" in seq and not re.search(r"@[MCFIOLp]\d+", seq)      # reverse-mapped labels
     assert "*(generated)*" in (out / "icd" / "sample_app_icd.md").read_text()
+
+    # provenance: every message is a derived, verified choice with evidence in real ids
+    prov = json.loads((out / "diagrams" / "sample_app_sequence_shop_api_read_item.provenance.json").read_text())
+    assert prov["schema"] == "archdoc.provenance/1" and prov["created"] is None and len(prov["ir_sha256"]) == 64
+    assert prov["llm"]["tier"] == "cloud" and prov["llm"]["detail"]["pseudonymize"] != "off"
+    (req,) = prov["requests"]
+    assert req["aliased"] and len(req["payload_sha256"]) == 64 and len(req["prompt_sha256"]) == 64
+    shown = [r for refs in req["shown"].values() for r in refs]
+    assert "shop.repo:ItemRepo.get" in shown and not any(r.startswith("@") for r in shown)
+    msgs = [i for i in prov["items"] if i["id"].startswith("message[")]
+    assert msgs and all(m["class"] == "derived" and m["verified"] for m in msgs)
+    get = next(m for m in msgs if m["call"] == "shop.repo:ItemRepo.get")
+    assert get["evidence"] == ["shop.repo:ItemRepo.get", "shop.api:read_item"]     # callee, then its caller
+
+    # ICD: fact / derived / open per slot; derived slots point at the request that wrote them
+    icd = json.loads((out / "icd" / "sample_app_icd.provenance.json").read_text())
+    assert set(icd["counts"]) == {"fact", "derived", "open"}
+    derived = [i for i in icd["items"] if i["class"] == "derived"]
+    assert derived and all(icd["requests"][i["request"]]["ok"] for i in derived)
+    assert icd["counts"]["derived"] == sum(1 for _ in derived)
+    assert not any(i.get("request") is not None for i in icd["items"] if i["class"] != "derived")
 
 
 def test_cli_adhoc_backend_defaults_to_cloud(tmp_path, monkeypatch, capsys):
@@ -493,7 +515,8 @@ def test_cli_skips_llm_when_backend_does_not_answer(tmp_path, monkeypatch, capsy
     assert rc == 0
     printed = capsys.readouterr().out
     assert "[SKIP] LLM outputs: no usable backend" in printed and "api/version: timed out" in printed
-    assert os.listdir(out / "diagrams") == ["sample_app_class.puml"]   # deterministic output still written
+    assert sorted(os.listdir(out / "diagrams")) == ["sample_app_class.provenance.json",
+                                                     "sample_app_class.puml"]   # deterministic output still written
     assert (out / "icd" / "sample_app_icd.md").exists()
 
 

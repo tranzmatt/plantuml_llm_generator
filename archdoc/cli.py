@@ -19,9 +19,10 @@ from .extract.python_ast import collect_python_files
 from .policy import PolicyError, load_config
 from .pseudonym import AliasMap
 from .plan.artifacts import PlanContext, plan_narrative, plan_sequence
-from .plan.entries import select_entries
+from .plan.entries import call_slice, select_entries
 from .render.icd import anchor, apply_narrative, build_icd_context, inventory_snapshot, render_icd
 from .render.puml.sequence import render_sequence_diagram
+from . import provenance
 from .flows import flow_entries, trace
 from .render.puml import (
     render_class_diagram, render_component_diagram, render_deployment_diagram, render_flow_diagram,
@@ -243,8 +244,14 @@ def _sequence_files(ir, args, llm):
         _save_plan(args, f"sequence_{slug}", result.plan)
         for w in result.warnings + warnings:
             print(f"  [WARN] {stem}: {w}")
+        ids = call_slice(ir, e.handler, llm.depth, llm.max_nodes)
+        prov = {"producer": "llm", "items": provenance.sequence_items(ir, result, ids),
+                "requests": [provenance.request_record(result, llm)],
+                "extra": {"llm": provenance.llm_header(llm), "entry": e.handler,
+                          "verification": {k: v for k, v in result.report.items() if k != "slice"},
+                          "slice": ids}}
         out.append((stem, f"{ir.repo}: {result.plan.get('title') or e.label}", text,
-                    f"({result.attempts} attempt(s), {took:.0f}s)"))
+                    f"({result.attempts} attempt(s), {took:.0f}s)", prov))
     return out
 
 
@@ -255,27 +262,37 @@ def _write(path: str, text: str) -> str:
     return path
 
 
+def _fact(what: str, evidence) -> dict:
+    return {"producer": "deterministic", "items": provenance.deterministic_items(what, list(evidence))}
+
+
 def _diagram_files(ir, types, depth, max_classes, members):
-    """[(filename stem, title, text)] for the requested deterministic diagrams."""
+    """[(filename stem, title, text, note, provenance)] for the requested deterministic diagrams."""
     out = []
     if "component" in types:
         out.append((f"{ir.repo}_component", f"{ir.repo}: components",
-                    render_component_diagram(ir, f"{ir.repo}_component", depth=depth)))
+                    render_component_diagram(ir, f"{ir.repo}_component", depth=depth), "",
+                    _fact("component diagram", [m.id for m in ir.modules] + [i.id for i in ir.interfaces])))
     if "class" in types:
         n_classes = sum(1 for _ in ir.iter_classes())
         if n_classes <= max_classes:
             out.append((f"{ir.repo}_class", f"{ir.repo}: classes",
-                        render_class_diagram(ir, f"{ir.repo}_class", members=members)))
+                        render_class_diagram(ir, f"{ir.repo}_class", members=members), "",
+                        _fact("class diagram", [c.id for c in ir.iter_classes()])))
         else:
             for g, mods in partition_modules(ir, max_classes):
                 stem = f"{ir.repo}_class_{g.replace('.', '_')}"
+                in_mods = [c.id for m in ir.modules if m.id in set(mods) for c in m.classes]
                 out.append((stem, f"{ir.repo}: classes in {g}",
-                            render_class_diagram(ir, stem, modules=mods, members=members)))
+                            render_class_diagram(ir, stem, modules=mods, members=members), "",
+                            _fact("class diagram", in_mods)))
     if "deployment" in types:
         for dep in ir.deployments:
             stem = f"{ir.repo}_deployment_{re.sub(r'[^A-Za-z0-9]+', '_', dep.file.rsplit('.', 1)[0]).strip('_')}"
             out.append((stem, f"{ir.repo}: deployment ({dep.file})",
-                        render_deployment_diagram(ir, dep, stem, title=f"Deployment: {dep.file}")))
+                        render_deployment_diagram(ir, dep, stem, title=f"Deployment: {dep.file}"), "",
+                        _fact("deployment diagram", [dep.file] + [m for s in dep.services for m in s.modules]
+                              + [s.dockerfile for s in dep.services if s.dockerfile])))
     if "flow" in types:
         # one cross-service sequence per user-facing entry, per deployment file (or the repo)
         for dep in ir.deployments or [None]:
@@ -285,10 +302,20 @@ def _diagram_files(ir, types, depth, max_classes, members):
                 eslug = re.sub(r"[^A-Za-z0-9]+", "_", f"{iface.owner}_{op.name}").strip("_")
                 stem = f"{ir.repo}_flow_{dslug}_{eslug}"
                 client = "User" if iface.kind in ("ui", "cli") else "Client"
+                flow = trace(ir, iface, op, dep)
                 out.append((stem, f"{ir.repo}: {op.name} across services ({where})",
-                            render_flow_diagram(trace(ir, iface, op, dep), stem, dep,
-                                                title=f"{iface.name}: {op.name} ({where})", client=client)))
+                            render_flow_diagram(flow, stem, dep, title=f"{iface.name}: {op.name} ({where})",
+                                                client=client), "",
+                            {"producer": "deterministic", "items": provenance.flow_items(flow),
+                             "extra": {"entry": op.id, "deployment": dep.file if dep else None}}))
     return out
+
+
+def _prov_header(args, ir) -> dict:
+    """Run header shared by every sidecar of one invocation."""
+    if getattr(args, "_prov", None) is None:
+        args._prov = provenance.run_header(args.repo, ir, dated=not getattr(args, "no_date", False))
+    return args._prov
 
 
 def _generate_diagrams(ir, args, llm=None) -> list:
@@ -302,14 +329,18 @@ def _generate_diagrams(ir, args, llm=None) -> list:
     planned = [t for t in types if t in PLANNED_DIAGRAMS]
     if planned and llm is None:
         print(f"  [SKIP] {', '.join(planned)}: needs an LLM (--backend NAME or --model MODEL)")
-    files = [(*f, "") for f in _diagram_files(ir, types, args.component_depth, args.max_classes, args.members)]
+    files = _diagram_files(ir, types, args.component_depth, args.max_classes, args.members)
     if "sequence" in planned and llm is not None:
         files += _sequence_files(ir, args, llm)
     written = []
     validate = not args.no_validate and plantuml_command() is not None
     failures = 0
-    for stem, title, text, note in files:
+    header = _prov_header(args, ir)
+    for stem, title, text, note, prov in files:
         path = _write(os.path.join(args.output, "diagrams", f"{stem}.puml"), text)
+        provenance.write(os.path.join(args.output, "diagrams", f"{stem}.provenance.json"),
+                         provenance.sidecar(header, f"{stem}.puml", prov["producer"], prov["items"],
+                                            prov.get("requests"), **prov.get("extra", {})))
         status = ""
         if validate:
             res = check_syntax(text)
@@ -325,10 +356,13 @@ def _generate_diagrams(ir, args, llm=None) -> list:
 
 
 def _narrate(llm, ctx, ifaces) -> None:
+    """Fill the ICD context; records each request in ctx["requests"] for the sidecar."""
     for iface in ifaces:
         t0 = time.monotonic()
         result = plan_narrative(llm, iface)
         took = time.monotonic() - t0
+        ctx.setdefault("requests", []).append(provenance.request_record(result, llm))
+        ctx.setdefault("request_index", {})[iface.id] = len(ctx["requests"]) - 1
         if result.ok:
             n = apply_narrative(ctx, iface.id, result.plan)
             print(f"  narrative for {iface.name}: {n} item(s) filled "
@@ -352,6 +386,7 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
         ctx["coverage"] = icd_coverage(ctx, ir)
         _write(os.path.join(args.output, "coverage.json"), json.dumps(ctx["coverage"], indent=1))
         path = _write(os.path.join(icd_dir, f"{ir.repo}_icd.md"), render_icd(ctx, args.template))
+        _icd_sidecar(args, ir, ctx, path, llm if narrate else None)
         print(f"  wrote {path}  ({ctx['summary']['interfaces']} interfaces, "
               f"{ctx['summary']['operations']} operations, {len(ctx['gaps'])} open items)")
         for line in coverage_lines(ctx["coverage"]):
@@ -365,10 +400,20 @@ def _generate_icd(ir, args, diagrams=None, llm=None) -> None:
                 _narrate(llm, ctx, [iface])
             ctx["coverage"] = icd_coverage(ctx, ir)
             path = _write(os.path.join(icd_dir, f"{anchor(iface.id)}.md"), render_icd(ctx, args.template))
+            _icd_sidecar(args, ir, ctx, path, llm if narrate else None)
             print(f"  wrote {path}")
     snap = os.path.join(_state_dir(args.output), "icd_snapshot.json")
     with open(snap, "w", encoding="utf-8") as fh:
         json.dump(inventory_snapshot(ir), fh, indent=1)
+
+
+def _icd_sidecar(args, ir, ctx, path, llm) -> None:
+    items = provenance.icd_items(ctx, ctx.get("request_index", {}))
+    extra = {"llm": provenance.llm_header(llm)} if llm is not None else {}
+    provenance.write(path[: -len(".md")] + ".provenance.json",
+                     provenance.sidecar(_prov_header(args, ir), os.path.basename(path),
+                                        "deterministic + llm" if llm is not None else "deterministic",
+                                        items, ctx.get("requests"), **extra))
 
 
 def _finish_llm(llm) -> None:

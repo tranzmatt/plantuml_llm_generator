@@ -211,7 +211,9 @@ def test_cli_all(tmp_path, capsys):
     out = tmp_path / "out"
     rc = main(["all", FIXTURE, "-o", str(out), "--no-validate", "--no-date", "--types", "class,component,sequence"])
     assert rc == 0
-    assert sorted(os.listdir(out / "diagrams")) == ["sample_app_class.puml", "sample_app_component.puml"]
+    assert sorted(f for f in os.listdir(out / "diagrams") if f.endswith(".puml")) == [
+        "sample_app_class.puml", "sample_app_component.puml"]
+    assert (out / "diagrams" / "sample_app_class.provenance.json").exists()
     icd = (out / "icd" / "sample_app_icd.md").read_text()
     assert "](../diagrams/sample_app_class.puml)" in icd
     assert (out / ".archdoc" / "icd_snapshot.json").exists()
@@ -221,7 +223,8 @@ def test_cli_all(tmp_path, capsys):
 def test_cli_icd_per_interface(tmp_path):
     out = tmp_path / "out"
     assert main(["icd", FIXTURE, "-o", str(out), "--scope", "interface", "--no-date"]) == 0
-    assert len(os.listdir(out / "icd")) == 7
+    assert len([f for f in os.listdir(out / "icd") if f.endswith(".md")]) == 7
+    assert len([f for f in os.listdir(out / "icd") if f.endswith(".provenance.json")]) == 7
 
 
 def test_cli_class_diagrams_split_when_large(tmp_path):
@@ -230,3 +233,19 @@ def test_cli_class_diagrams_split_when_large(tmp_path):
                  "--no-validate"]) == 0
     files = sorted(os.listdir(out / "diagrams"))
     assert len(files) > 1 and all(f.startswith("sample_app_class_") for f in files)
+
+
+def test_deterministic_sidecars_are_reproducible(tmp_path):
+    import json
+    a, b = tmp_path / "a", tmp_path / "b"
+    for out in (a, b):
+        assert main(["all", FIXTURE, "-o", str(out), "--no-validate", "--no-date"]) == 0
+    for rel in ("diagrams/sample_app_class.provenance.json", "icd/sample_app_icd.provenance.json"):
+        assert (a / rel).read_text() == (b / rel).read_text()
+    cls = json.loads((a / "diagrams" / "sample_app_class.provenance.json").read_text())
+    assert cls["producer"] == "deterministic" and cls["counts"] == {"fact": 1}
+    assert "shop.repo:ItemRepo" in cls["items"][0]["evidence"]
+    icd = json.loads((a / "icd" / "sample_app_icd.provenance.json").read_text())
+    assert "derived" not in icd["counts"] and "requests" not in icd
+    env = {i["id"]: i["class"] for i in icd["items"]}
+    assert env["op:if:http:shop.api:router:GET /{item_id}"] == "fact"        # docstring

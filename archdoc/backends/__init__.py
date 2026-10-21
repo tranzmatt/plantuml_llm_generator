@@ -44,6 +44,7 @@ class LLMBackend:
     # set when the backend became unreachable during a run: later requests are
     # skipped instead of each waiting out its own timeout (circuit breaker)
     unavailable: Optional[str] = None
+    digest: Optional[str] = None       # model content digest, where the server reports one (Ollama)
 
     def complete_json(self, system: str, user: str, schema: Dict[str, Any],
                       max_tokens: int = 2048) -> Completion:
@@ -99,6 +100,9 @@ class OllamaBackend(LLMBackend):
         names = {n for m in tags.get("models", []) for n in (m.get("name"), m.get("model")) if n}
         if self.model not in names and f"{self.model}:latest" not in names:
             raise BackendError(f"{self.url} does not have model {self.model!r}")
+        self.digest = next((m.get("digest") for m in tags.get("models", [])
+                            if self.model in (m.get("name"), m.get("model"))
+                            or f"{self.model}:latest" in (m.get("name"), m.get("model"))), None)
 
     def warm_up(self) -> Optional[float]:
         """An empty generate loads the model (and pays first-use GPU setup) once,

@@ -45,6 +45,11 @@ class PlanResult:
     warnings: List[str] = field(default_factory=list)
     prompt_tokens: int = 0              # summed over attempts, where the server reports them
     completion_tokens: int = 0
+    # provenance (DESIGN.md 2.1): what the answer was based on
+    payload_sha256: str = ""
+    prompt_sha256: str = ""             # system prompt + instructions, i.e. the prompt version
+    shown: Dict[str, List[str]] = field(default_factory=dict)   # role -> real ids in the payload
+    backend: Dict[str, Optional[str]] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -101,6 +106,12 @@ def run_plan(
     to_payload_terms = payload_terms(payload, aliases)
     system = system + "\n\nRESPONSE FORMAT: one JSON object with exactly these keys, all required:\n" \
         + outline(schema)
+    result.payload_sha256 = payload.sha256
+    result.prompt_sha256 = hashlib.sha256((system + "\0" + instructions).encode()).hexdigest()
+    result.shown = {role: [aliases.resolve_ref(r) or r if ALIAS_RE.fullmatch(r) else r for r in refs]
+                    for role, refs in payload.allowed.items()}
+    result.backend = {"name": backend.name, "model": backend.model, "url": backend.url,
+                      "digest": getattr(backend, "digest", None)}
     base_user = instructions + payload.text
     user = base_user
     for attempt in range(1, repairs + 2):
