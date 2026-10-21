@@ -71,9 +71,24 @@ they describe changes. Approved sequence diagrams are redrawn from
 `review/plans/` with no model at all.
 
 Model-written text that repeats 8 or more consecutive words of your code
-(bodies, comments, string literals; signatures and docstrings are allowed) is
+(bodies, comments, string literals; signatures and docstrings are allowed), or
+quotes a distinctive string literal from a body (SQL, a regex, a message of 5+
+words; names and URLs are allowed), is
 sent back for rewording once and cleared if it still does; set
 `[overlap] mode = "flag"` to keep it and only report it.
+
+For rebuild content, `archdoc design REPO --backend X` (or `archdoc all ... --design`)
+writes `archdoc_out/design/<repo>_design.md`: module, package and system
+summaries, a behavior specification for every public function (purpose,
+inputs, returns, preconditions, side effects, errors, algorithm), each
+labelled with what it was written from (source, outline or signature only),
+the dependency manifest with declared-versus-imported mismatches, and the test
+inventory as acceptance criteria. Without a model you still get the manifest,
+the test inventory and exact specifications of trivial functions. It makes one
+request per public function, so use `--only PACKAGE` or `--max-functions N` to
+start small. Model answers are cached in `archdoc_out/.archdoc/cache/`: a rerun
+with no code change sends nothing, and after a change only the affected
+requests are sent again (`--no-cache` to ask again anyway).
 
 `archdoc eval REPO --spec eval/<name>.toml --backend a,b,c` compares the
 extracted architecture with a reference diagram and the backends with each other

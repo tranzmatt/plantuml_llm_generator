@@ -116,16 +116,17 @@ need the Phase 4a packer.
 |-------------|----------|-------------|--------|
 | every external interface, exactly | ICD tables (routes, CLI, env, messages) | extraction | FastAPI, argparse/Click/Typer, env: done; Flask/Django, messaging, gRPC, OpenAPI: 6 |
 | data structures | data dictionary, class diagrams | extraction | done |
-| module structure and dependencies | component diagram; dependency manifest (third-party packages and versions from requirements/pyproject) | extraction | manifest: 4c |
+| module structure and dependencies | component diagram; dependency manifest (third-party packages and versions from requirements/pyproject) | extraction | done (4c) |
 | interaction behavior | sequence diagrams per entry point | model + verification | diagrams: done; verification: 4b |
-| algorithmic behavior | **behavior specifications** per public function: purpose, inputs, outputs, preconditions, side effects, errors, algorithm in prose | model, from source (local) | 4c |
+| algorithmic behavior | **behavior specifications** per public function: purpose, inputs, outputs, preconditions, side effects, errors, algorithm in prose | model, from source (local); trivial functions from the AST | done (4c) |
 | state behavior | state diagrams | model + verification | 4d |
-| expected behavior | **test inventory**: tests as acceptance criteria (what each test exercises and asserts) | extraction + model | 4c |
+| expected behavior | **test inventory**: tests as acceptance criteria (what each test exercises and asserts) | extraction + model | done (4c) |
 | configuration and runtime | env vars, ports, entry points, deployment diagram | extraction + model | partly done |
 
 Behavior specifications go into a design-description document alongside the ICD,
 comparable in role to a MIL-STD-498 Software Design Description (DI-IPSC-81435).
-The section mapping is to be confirmed when the template is built.
+4c writes it with a lightweight template (`<out>/design/<repo>_design.md`, see
+12.7); the SDD section mapping is to be confirmed when that template is built (4d).
 
 Tests are read as evidence only: they don't appear as components. That way a
 user can exclude `tests/` from the diagrams and still get the test inventory.
@@ -186,6 +187,15 @@ answer.
 - Temperature 0, with model name and digest, prompt version, payload hash, IR hash
   and git commit all recorded. Model output is cached on those keys, so a rerun
   with no code or model change makes no model calls and produces identical documents.
+
+  *Implemented (4c):* `archdoc.cache`. Each attempt is cached on its exact
+  request (model, digest, system prompt, user prompt including any repair text,
+  schema, answer budget) in `<out>/.archdoc/cache/`. The payload already holds
+  everything an answer depends on, so there is nothing else to invalidate.
+  Answers are replayed, not verdicts: a cached answer goes through every check
+  again, so a check added later applies to old answers too. The model is loaded
+  lazily, before the first request not answered from the cache, so a fully
+  cached rerun never loads it. `--no-cache` asks again.
 - **Review overlay:** human edits and approvals live in `<out>/review/`, keyed by
   item id and the hash of the evidence they were based on. Regeneration never
   overwrites a reviewed item. If the underlying code changes, the item is
@@ -796,6 +806,65 @@ as source and 29 as outlines; at 32k every function is sent as source.
 Found on the way: the secret scanner's AWS-key pattern required a word boundary,
 so a key glued to more characters (`"AKIA...J"[:20]`) passed. It no longer does.
 
+### 12.7 Implementation status (4c)
+
+`archdoc design REPO` (or `archdoc all --design`) writes
+`<out>/design/<repo>_design.md` with its provenance sidecar, plus
+`manifest.json`, `tests.json` and `design_coverage.json`:
+
+- **Behavior specifications** (`plan_behavior`): one request per public
+  function. The payload is the target first in rank (source where policy
+  allows), its callees (upgraded as room allows) and, for a method, its class's
+  fields. Inputs, side effects and errors are enums of the target's parameters,
+  its calls and the exception types it or a callee raises, so a claim about an
+  error the code cannot raise cannot be expressed. Every text field goes
+  through the overlap guard. The specification is labelled with its evidence
+  (`source`, `outline`, `signature`), shown next to it in the document.
+- **Trivial functions are specified from the AST**, without a model: an empty
+  body, returning a parameter, a constant or an empty container, or returning
+  one call made with the parameters as they are. mistral-nemo described an
+  empty Click group as "seeding the database" and `return item` as validating
+  and storing it; these now read "Has no behavior of its own" and "Returns its
+  argument `item` unchanged". (9 of the fixture's 18 functions; 2 of this repo's 364.)
+- **Hierarchical summaries** (12.5): module summaries from a pack of the module
+  (members most called from elsewhere first), then package summaries from their
+  modules' summaries, then the system summary from the packages'. Collaborators
+  are enums of the module's import and call edges; externals are its
+  third-party imports (the standard library is not an external system). The
+  text passed upward is the model's own wording as it was written (aliased for
+  an aliased tier), never the restored text. A package with one module reuses
+  that module's summary; with one package, its summary is the system's. The
+  content-hash cache is the response cache: a package's payload is made of
+  its modules' summaries, so it is re-asked exactly when one of them changed.
+- **Dependency manifest** (`archdoc.manifest`, deterministic): requirements
+  files, `pyproject.toml` (PEP 621 and Poetry), `setup.cfg` and Dockerfile `pip
+  install` lines, each covering the code under its directory; the third-party
+  imports of every module, matched to distribution names (a table covers
+  `yaml`→PyYAML, `cv2`→opencv-python and the like). Disagreements are listed:
+  imported but not declared by any covering file, declared but not imported
+  (tools and servers are noted as such).
+- **Test inventory** (`archdoc.testsuite`): tests are extracted with the code
+  even when the diagrams exclude them (only excludes that name tests are
+  ignored), and never drawn. Per test: location, the documented functions and
+  classes it calls, the exceptions it expects (`pytest.raises`,
+  `assertRaises`), assertions, parametrized cases, fixtures and markers, all
+  from the AST; one request per test module adds an acceptance criterion per
+  test. Each function's specification lists the tests that exercise it.
+- **Literal guard** (2.5): a distinctive string literal from a function body
+  quoted verbatim is an overlap, however short. Distinctive: at least 8
+  characters and structure (SQL, a regex, a format string) or at least 5 words.
+  Names (identifier-shaped literals), URLs and interface strings are allowed.
+  mistral-nemo quoted error details and magic strings into its first
+  specifications; the guard sends them back without quoting them.
+- **Coverage**: behavior specifications per evidence level, module summaries,
+  tests with criteria, public functions exercised directly by a test, and
+  dependency issues, printed and in `design_coverage.json`.
+
+Not yet: review-overlay entries for specifications and summaries (they are
+regenerated, or replayed from the cache), the SDD layout (4d), and checking an
+algorithm's steps against the outline (a step naming a call the function
+does not make).
+
 ## 13. Harness integration
 
 ### 13.1 Core idea
@@ -962,7 +1031,8 @@ archdoc extract     <repo>                # write IR + interface inventory
 archdoc egress      <repo> --backend X --dry-run
 archdoc diagrams    <repo> --backend X [--types class,sequence]
 archdoc icd         <repo> --backend X [--scope interface] [--template idd]
-archdoc all         <repo> --backend X    # diagrams + ICDs, one extraction
+archdoc all         <repo> --backend X    # diagrams + ICDs, one extraction (--design: + design description)
+archdoc design      <repo> --backend X    # summaries, behavior specs, dependency manifest, test inventory
 archdoc check       <repo>                # ICD drift, no LLM
 archdoc serve-mcp   --repo R --out O --trust local|cloud
 ```
@@ -1119,11 +1189,12 @@ Notes from implementation:
 3. **ICD granularity default:** per interface, per component pair, or one system ICD?
 4. **Behavior specification format:** a MIL-STD-498 SDD-style document, per-module
    Markdown, or something program-specific? How much detail per function
-   (prose only, or prose plus pseudocode)?
+   (prose only, or prose plus pseudocode)? *4c: one Markdown document, modules
+   in order, prose steps (no pseudocode); the SDD layout is 4d.*
 5. **Unverifiable model claims:** remove them (current default) or keep them,
    clearly marked as unverified?
-6. **Tests as evidence:** read `tests/` for the test inventory even when excluded
-   from diagrams (proposed default), or only on request?
+6. ~~**Tests as evidence**~~: read for the test inventory even when excluded from
+   the diagrams (implemented in 4c).
 7. ~~**Accuracy reference set**~~: github.com/tranzmatt/celebrity-rec-rabbitmq
    (public; author's Mermaid diagram as reference), spec in `eval/`.
 8. **Glossary script:** fold into the ICD as an acronyms/terms appendix, or retire?

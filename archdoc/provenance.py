@@ -84,6 +84,7 @@ def request_record(result, ctx=None) -> Dict[str, Any]:
         "aliased": result.payload_aliased,
         "shown": result.shown,
         "attempts": result.attempts,
+        "cached": getattr(result, "cached", 0),        # attempts replayed from the response cache
         "ok": result.ok,
         "fit": result.fit,
         "levels": result.levels,

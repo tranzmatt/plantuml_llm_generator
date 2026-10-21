@@ -58,6 +58,13 @@ class LLMBackend:
         """Load the model before real requests; returns seconds taken, or None if not applicable."""
         return None
 
+    def ensure_ready(self) -> None:
+        """Warm up once, before the first request actually sent: a run answered
+        entirely from the response cache never loads the model."""
+        if not getattr(self, "_ready", False):
+            self._ready = True
+            self.warm_up()
+
 
 def _post(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout: int) -> Dict[str, Any]:
     req = urllib.request.Request(

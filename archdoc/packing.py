@@ -144,7 +144,7 @@ def encode_payload(data: Dict[str, Any], encoding: str) -> str:
 # -- short ids ---------------------------------------------------------------------------
 
 # fields whose values are ids; nothing else (prose, signatures) is rewritten
-REF_KEYS = {"ref", "owner", "handler", "calls", "creates", "raises", "bases", "imports"}
+REF_KEYS = {"ref", "owner", "handler", "calls", "creates", "raises", "bases", "imports", "target", "module", "package"}
 _SEP = re.compile(r"[.:]")
 
 

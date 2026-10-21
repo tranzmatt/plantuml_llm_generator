@@ -31,6 +31,7 @@ import json
 import math
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -152,6 +153,9 @@ class _ViewBuilder:
         }
         self.redactions: List[Tuple[str, str]] = []
         self.abort_findings: List[Tuple[str, str]] = []
+        # function id -> outline | source for function_view (archdoc.packing); needs `root`
+        self.detail: Dict[str, str] = {}
+        self.root: Optional[str] = None
 
     # -- policy helpers -----------------------------------------------------
 
@@ -376,6 +380,10 @@ class _ViewBuilder:
             for key, ids in (("calls", fn.calls), ("creates", fn.creates), ("raises", fn.raises)):
                 if ids:
                     out[key] = [self.symbol_ref(i, mid) for i in ids]
+        level = self.detail.get(fn.id)
+        body = self.body_view(fn.id, mid, level, self.root) if level else None
+        if body is not None:
+            out[level] = body
         return out
 
     def body_view(self, fid: str, mid: str, level: str, root: Optional[str]) -> Optional[str]:
@@ -690,6 +698,148 @@ def build_repo_map(ir: RepoIR, config: Config, tier: str, aliases: AliasMap,
     if b.abort_findings:
         return []
     return out
+
+
+def is_stdlib(ext_id: str) -> bool:
+    root = ext_id[len(EXTERNAL_PREFIX):].split(".")[0] if ext_id.startswith(EXTERNAL_PREFIX) else ext_id
+    return root in sys.stdlib_module_names or root == "__future__"
+
+
+def _builder(ir: RepoIR, config: Config, tier: str, aliases: AliasMap,
+             detail: Optional[Dict[str, str]], root: Optional[str]) -> _ViewBuilder:
+    b = _ViewBuilder(ir, config, tier, aliases)
+    b.detail, b.root = dict(detail or {}), root
+    return b
+
+
+def _with_map(data: Dict[str, Any], repo_map: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    return {"system_map": repo_map, **data} if repo_map else data
+
+
+def build_function_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap, function_id: str,
+                           detail: Optional[Dict[str, str]] = None, root: Optional[str] = None,
+                           repo_map: Optional[List[Dict[str, Any]]] = None) -> Payload:
+    """One function to specify (first in "functions"), the functions it calls
+    (stubs unless `detail` upgrades them) and, for a method, its class's fields."""
+    b = _builder(ir, config, tier, aliases, detail, root)
+    if not b.base.level_at_least("callgraph"):
+        raise EgressAborted([("policy", f"level={b.base.level} does not allow call graphs")])
+    fn = ir.find_function(function_id)
+    if fn is None:
+        raise KeyError(function_id)
+    mid = b.owner_module(function_id)
+    owner = participant_of(function_id)
+    target = b.function_view(fn, mid, is_method=owner != mid)
+    target.pop("decorators", None)
+    callees = [c for c in dict.fromkeys(fn.calls) if not c.startswith(EXTERNAL_PREFIX) and ir.find_function(c)]
+    views = [target]
+    raises = list(fn.raises)
+    for cid in callees:
+        callee = ir.find_function(cid)
+        cmid = b.owner_module(cid)
+        cv = b.function_view(callee, cmid, is_method=participant_of(cid) != cmid)
+        for k in ("decorators", "calls", "creates"):
+            cv.pop(k, None)
+        views.append(cv)
+        raises += [r for r in callee.raises if r not in raises]
+    data: Dict[str, Any] = {"target": target["ref"]}
+    cls = ir.find_class(owner) if owner != mid else None
+    if cls is not None:
+        cv = b.class_view(cls, mid)
+        cv.pop("methods", None)
+        data["owner_class"] = cv
+    data["functions"] = views
+    params = [p.name for p in fn.params if p.name not in ("self", "cls")]
+    return _finish(b, _with_map(data, repo_map), tier, f"behavior:{function_id}", {
+        "function": [target["ref"]],
+        "params": [b.name(p, mid) for p in params],
+        "calls": [b.symbol_ref(c, mid) for c in dict.fromkeys(fn.calls)],
+        "raises": [b.symbol_ref(r, mid) for r in dict.fromkeys(raises)],
+    })
+
+
+def module_collaborators(ir: RepoIR, mid: str) -> List[str]:
+    """Internal modules `mid` imports or calls into: the only valid collaborators of its summary."""
+    m = ir.module(mid)
+    ids = {m2.id for m2 in ir.modules}
+    out = [i for i in m.imports if i in ids and i != mid]
+    for fn in [*m.functions, *(f for c in m.classes for f in c.methods)]:
+        for c in fn.calls:
+            cm = c.split(":")[0]
+            if cm in ids and cm != mid and cm not in out:
+                out.append(cm)
+    return out
+
+
+def module_externals(ir: RepoIR, mid: str) -> List[str]:
+    """Third-party libraries `mid` imports (the standard library is not an external system)."""
+    m = ir.module(mid)
+    return [i for i in m.imports if i.startswith(EXTERNAL_PREFIX) and not is_stdlib(i)]
+
+
+def build_module_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap, mid: str,
+                         detail: Optional[Dict[str, str]] = None, root: Optional[str] = None,
+                         repo_map: Optional[List[Dict[str, Any]]] = None) -> Payload:
+    """One module for its summary: its members (stubs unless `detail` upgrades them)."""
+    b = _builder(ir, config, tier, aliases, detail, root)
+    m = ir.module(mid)
+    view = b.module_view(m)
+    members = [c["ref"] for c in view.get("classes", [])] + [f["ref"] for f in view.get("functions", [])]
+    return _finish(b, _with_map({"module": view}, repo_map), tier, f"summary:{mid}", {
+        "members": members,
+        "collaborators": [b.module_ref(x) for x in module_collaborators(ir, mid)],
+        "external": [b.symbol_ref(x, mid) for x in module_externals(ir, mid)],
+    })
+
+
+def build_group_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap, group: str,
+                        parts: List[Tuple[str, str]], collaborators: List[str], external: List[str],
+                        repo_map: Optional[List[Dict[str, Any]]] = None) -> Payload:
+    """A package (parts = its modules) or the system (parts = its packages), from
+    the parts' summaries. The texts are the model's own earlier answers, as the
+    model wrote them (aliased for an aliased tier); they are scanned like any leaf."""
+    b = _ViewBuilder(ir, config, tier, aliases)
+    rows = []
+    for ref_id, text in parts:
+        rows.append({"ref": b.module_ref(ref_id), "summary": b._emit(text, ref_id, ref_id) or ""})
+    key = "packages" if group == "" else "modules"
+    data: Dict[str, Any] = {"package": b.module_ref(group)} if group else {"system": b.repo_name()}
+    data[key] = rows
+    return _finish(b, _with_map(data, repo_map), tier, f"summary:{group or '<system>'}", {
+        "parts": [r["ref"] for r in rows],
+        "collaborators": [b.module_ref(c) for c in collaborators],
+        "external": [b.symbol_ref(e) for e in external],
+    })
+
+
+def build_tests_payload(ir: RepoIR, config: Config, tier: str, aliases: AliasMap, mid: str,
+                        test_ids: List[str], exercised: List[str], detail: Optional[Dict[str, str]] = None,
+                        root: Optional[str] = None) -> Payload:
+    """The tests of one test module (sources as `detail` allows) and the code they exercise (stubs)."""
+    b = _builder(ir, config, tier, aliases, detail, root)
+    tests, seen = [], []
+    for tid in test_ids:
+        fn = ir.find_function(tid)
+        if fn is None:
+            continue
+        tmid = b.owner_module(tid)
+        tv = b.function_view(fn, tmid, is_method=participant_of(tid) != tmid)
+        tests.append(tv)
+        seen.append(tv["ref"])
+    code = []
+    for fid in exercised:
+        fn = ir.find_function(fid)
+        if fn is None:
+            continue
+        cmid = b.owner_module(fid)
+        cv = b.function_view(fn, cmid, is_method=participant_of(fid) != cmid)
+        for k in ("decorators", "calls", "creates", "outline", "source"):
+            cv.pop(k, None)
+        code.append(cv)
+    data: Dict[str, Any] = {"module": b.module_ref(mid), "tests": tests}
+    if code:
+        data["exercised"] = code
+    return _finish(b, data, tier, f"tests:{mid}", {"tests": seen})
 
 
 def build_payload(

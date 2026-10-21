@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ..backends import LLMBackend
-from ..egress import EgressLog, build_interface_payload, build_repo_map, build_sequence_payload
+from ..cache import ResponseCache
+from ..egress import (
+    EgressLog, build_function_payload, build_group_payload, build_interface_payload, build_module_payload,
+    build_repo_map, build_sequence_payload, build_tests_payload,
+)
 from ..interfaces import Interface
 from ..ir import RepoIR
 from ..policy import Config
@@ -21,7 +25,10 @@ from . import prompts
 from .entries import Entry, call_slice
 from .planner import PlanResult, run_plan
 from .verify import prune_sequence, verify_sequence
-from .schemas import CLIENT, narrative_schema, outline, sequence_schema
+from .schemas import (
+    CLIENT, behavior_schema, group_summary_schema, module_summary_schema, narrative_schema, outline,
+    sequence_schema, tests_schema,
+)
 
 
 @dataclass
@@ -43,6 +50,7 @@ class PlanContext:
     calibration: Optional[Calibration] = None
     repo_map: Optional[List[Dict[str, Any]]] = None
     map_share: float = 0.15
+    cache: Optional[ResponseCache] = None   # model responses by exact request (archdoc.cache)
 
 
 def dedupe_participants(plan: Any) -> None:
@@ -185,6 +193,11 @@ def _repo_map(ctx: PlanContext) -> List[Dict[str, Any]]:
     return ctx.repo_map
 
 
+def _ask(ctx: PlanContext, payload, schema, system, instructions, validate) -> PlanResult:
+    return run_plan(ctx.backend, payload, schema, system, instructions, ctx.aliases, validate=validate,
+                    log=ctx.log, max_tokens=MAX_TOKENS, cache=ctx.cache)
+
+
 def _calibrate(ctx: PlanContext, result: PlanResult) -> None:
     if ctx.calibration is not None:
         ctx.calibration.observe(ctx.backend.model, result.first_prompt_chars, result.first_prompt_tokens)
@@ -248,14 +261,12 @@ def plan_sequence(ctx: PlanContext, entry: Entry) -> PlanResult:
 
     budget = _budget(ctx, system, instructions, schema)
     packed = fit(budget)
-    result = run_plan(ctx.backend, packed.payload, schema, system, instructions, ctx.aliases,
-                      validate=validate, log=ctx.log, max_tokens=MAX_TOKENS)
+    result = _ask(ctx, packed.payload, schema, system, instructions, validate)
     if result.overflow:
         _calibrate(ctx, result)
         notes.append("the prompt overflowed the window; repacked smaller and retried")
         packed = fit(min(int(budget * 0.6), _budget(ctx, system, instructions, schema)))
-        result = run_plan(ctx.backend, packed.payload, schema, system, instructions, ctx.aliases,
-                          validate=validate, log=ctx.log, max_tokens=MAX_TOKENS)
+        result = _ask(ctx, packed.payload, schema, system, instructions, validate)
     _calibrate(ctx, result)
     result.levels, result.fit = packed.levels, _fit(packed, ctx)
     result.warnings = notes + result.warnings
@@ -294,8 +305,40 @@ def check_narrative(plan: Any) -> List[str]:
     return [f"operations described more than once: {', '.join(dupes)}"] if dupes else []
 
 
-def plan_narrative(ctx: PlanContext, iface: Interface) -> PlanResult:
+def _plan_packed(ctx: PlanContext, build, ranked: List[str], schema_of, prompts_of, structural,
+                 texts=overlap_guard.plan_texts, what: str = "the input") -> PlanResult:
+    """Pack `ranked` items into the window, plan, repair once. `structural` checks
+    the plan's shape; the overlap guard runs on `texts`. A plan that fails only
+    the overlap check after repair is kept with the overlapping text cleared."""
     policy = ctx.config.policy_for(ctx.tier)
+    stub = build({})
+    schema = schema_of(stub.allowed)
+    system, instructions = prompts_of(bool(ALIAS_RE.search(stub.text)))
+
+    def validate(plan: Any) -> List[str]:
+        return structural(plan) + overlap_guard.errors(ctx.overlap, texts(plan))
+
+    budget = _budget(ctx, system, instructions, schema)
+    packed = pack(build, ranked, allowed_levels(policy), budget)
+    notes = [] if packed.fits else [f"{what} does not fit the window even as stubs; sent anyway"]
+    result = _ask(ctx, packed.payload, schema, system, instructions, validate)
+    if result.overflow:
+        _calibrate(ctx, result)
+        notes.append("the prompt overflowed the window; repacked smaller and retried")
+        packed = pack(build, ranked, allowed_levels(policy),
+                      min(int(budget * 0.6), _budget(ctx, system, instructions, schema)))
+        result = _ask(ctx, packed.payload, schema, system, instructions, validate)
+    _calibrate(ctx, result)
+    result.levels, result.fit = packed.levels, _fit(packed, ctx)
+    result.warnings = notes + result.warnings
+    if not result.ok and result.candidate is not None and not structural(result.candidate):
+        result.plan, result.raw, result.errors = result.candidate, result.candidate_raw, []
+    if result.ok:
+        result.warnings += overlap_guard.enforce(ctx.overlap, result.plan, texts(result.plan))
+    return result
+
+
+def plan_narrative(ctx: PlanContext, iface: Interface) -> PlanResult:
     repo_map = _repo_map(ctx)
     handlers = list(dict.fromkeys(op.handler for op in iface.operations if op.handler))
 
@@ -303,36 +346,119 @@ def plan_narrative(ctx: PlanContext, iface: Interface) -> PlanResult:
         return build_interface_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, iface, detail=detail,
                                        root=ctx.root, repo_map=repo_map)
 
-    stub = build({})
-    schema = narrative_schema(stub.allowed["operations"], stub.allowed["params"])
-    system, instructions = prompts.narrative_prompts(bool(ALIAS_RE.search(stub.text)))
+    return _plan_packed(ctx, build, handlers,
+                        lambda a: narrative_schema(a["operations"], a["params"]),
+                        prompts.narrative_prompts, check_narrative, overlap_guard.narrative_texts,
+                        what="the interface")
 
-    def validate(plan: Any) -> List[str]:
-        return check_narrative(plan) + overlap_guard.errors(ctx.overlap, overlap_guard.narrative_texts(plan))
 
-    budget = _budget(ctx, system, instructions, schema)
-    packed = pack(build, handlers, allowed_levels(policy), budget)
-    notes = [] if packed.fits else ["the interface does not fit the window even as stubs; sent anyway"]
-    result = run_plan(ctx.backend, packed.payload, schema, system, instructions, ctx.aliases,
-                      validate=validate, log=ctx.log, max_tokens=MAX_TOKENS)
-    if result.overflow:
-        _calibrate(ctx, result)
-        notes.append("the prompt overflowed the window; repacked smaller and retried")
-        packed = pack(build, handlers, allowed_levels(policy), min(int(budget * 0.6),
-                                                                 _budget(ctx, system, instructions, schema)))
-        result = run_plan(ctx.backend, packed.payload, schema, system, instructions, ctx.aliases,
-                          validate=validate, log=ctx.log, max_tokens=MAX_TOKENS)
-    _calibrate(ctx, result)
-    result.levels, result.fit = packed.levels, _fit(packed, ctx)
-    result.warnings = notes + result.warnings
-    if not result.ok and result.candidate is not None and not check_narrative(result.candidate):
-        # only the overlap check failed after repair: keep the rest, clear what overlaps
-        result.plan, result.raw, result.errors = result.candidate, result.candidate_raw, []
-    if result.ok:
-        result.warnings += overlap_guard.enforce(ctx.overlap, result.plan, overlap_guard.narrative_texts(result.plan))
+# -- rebuild content (4c) ---------------------------------------------------------------
+
+def _dedupe(items: List[Dict[str, Any]], key: str) -> None:
+    """An entry listed twice is a formatting slip, not a factual error: keep the
+    first, adding any other wording the repeats carry."""
+    first: Dict[str, Dict[str, Any]] = {}
+    kept = []
+    for it in items:
+        if it[key] not in first:
+            first[it[key]] = it
+            kept.append(it)
+            continue
+        for k, v in it.items():
+            if k != key and isinstance(v, str) and v and v not in first[it[key]].get(k, ""):
+                first[it[key]][k] = (first[it[key]][k] + "; " + v).lstrip("; ")
+    items[:] = kept
+
+
+def check_behavior(plan: Any) -> List[str]:
+    _dedupe(plan["inputs"], "name")
+    _dedupe(plan["errors"], "ref")
+    _dedupe(plan["side_effects"], "ref")
+    return []
+
+
+def plan_behavior(ctx: PlanContext, function_id: str) -> PlanResult:
+    """Behavior specification of one function: the target first in rank (source
+    where policy allows), then its callees. Inputs, side effects and errors can
+    only name the target's parameters, its calls and the exception types it or a
+    callee raises (schema enums), so a claim about an error the code cannot raise
+    is not expressible."""
+    repo_map = _repo_map(ctx)
+    fn = ctx.ir.find_function(function_id)
+    ranked = [function_id] + [c for c in dict.fromkeys(fn.calls) if c != function_id and ctx.ir.find_function(c)]
+
+    def build(detail: Dict[str, str]):
+        return build_function_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, function_id, detail=detail,
+                                      root=ctx.root, repo_map=repo_map)
+
+    result = _plan_packed(ctx, build, ranked,
+                          lambda a: behavior_schema(a["function"], a["params"], a["calls"], a["raises"]),
+                          prompts.behavior_prompts, check_behavior, what="the function")
+    result.report = {"evidence": result.levels.get(function_id, "stub")}
     return result
 
 
-__all__ = ["CLIENT", "PlanContext", "check_narrative", "check_sequence", "drop_unused_participants",
-           "fix_reply_flags", "keep_grounded_labels",
-           "plan_narrative", "plan_sequence"]
+def _member_rank(ir: RepoIR, mid: str) -> List[str]:
+    """A module's functions, most called from elsewhere first (DESIGN.md 12.2)."""
+    m = ir.module(mid)
+    fns = [f for f in [*m.functions, *(x for c in m.classes for x in c.methods)]]
+    callers: Dict[str, int] = {}
+    for f in ir.iter_functions():
+        for c in set(f.calls):
+            callers[c] = callers.get(c, 0) + 1
+    return [f.id for f in sorted(fns, key=lambda f: (f.visibility != "public", -callers.get(f.id, 0), f.id))]
+
+
+def check_summary(plan: Any) -> List[str]:
+    for key in ("key_operations", "parts", "collaborators", "external"):
+        if key in plan:
+            _dedupe(plan[key], "ref")
+    return []
+
+
+def plan_module_summary(ctx: PlanContext, mid: str) -> PlanResult:
+    repo_map = _repo_map(ctx)
+
+    def build(detail: Dict[str, str]):
+        return build_module_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, mid, detail=detail,
+                                    root=ctx.root, repo_map=repo_map)
+
+    return _plan_packed(ctx, build, _member_rank(ctx.ir, mid),
+                        lambda a: module_summary_schema(a["members"], a["collaborators"], a["external"]),
+                        prompts.module_summary_prompts, check_summary, what="the module")
+
+
+def plan_group_summary(ctx: PlanContext, group: str, parts: List[Any], collaborators: List[str],
+                       external: List[str]) -> PlanResult:
+    """A package summary from its modules' summaries, or (group "") the system
+    summary from the packages'. `parts` is [(id, summary text as the model wrote it)]."""
+    repo_map = _repo_map(ctx)
+
+    def build(detail: Dict[str, str]):
+        return build_group_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, group, parts, collaborators,
+                                   external, repo_map=repo_map)
+
+    return _plan_packed(ctx, build, [],
+                        lambda a: group_summary_schema(a["parts"], a["collaborators"], a["external"]),
+                        prompts.group_summary_prompts, check_summary,
+                        what="the package" if group else "the system")
+
+
+def check_tests(plan: Any) -> List[str]:
+    _dedupe(plan["tests"], "ref")
+    return []
+
+
+def plan_tests(ctx: PlanContext, mid: str, test_ids: List[str], exercised: List[str]) -> PlanResult:
+    def build(detail: Dict[str, str]):
+        return build_tests_payload(ctx.ir, ctx.config, ctx.tier, ctx.aliases, mid, test_ids, exercised,
+                                   detail=detail, root=ctx.root)
+
+    return _plan_packed(ctx, build, test_ids, lambda a: tests_schema(a["tests"]), prompts.tests_prompts,
+                        check_tests, what="the test module")
+
+
+__all__ = ["CLIENT", "PlanContext", "check_behavior", "check_narrative", "check_sequence", "check_summary",
+           "check_tests", "drop_unused_participants", "fix_reply_flags", "keep_grounded_labels",
+           "plan_behavior", "plan_group_summary", "plan_module_summary", "plan_narrative", "plan_sequence",
+           "plan_tests"]

@@ -28,6 +28,10 @@ from . import provenance
 from .overlap import SourceIndex
 from .packing import Calibration
 from .review import Review, apply_to_icd, icd_evidence, offer_icd, sequence_evidence
+from .cache import ResponseCache
+from .design import DesignOptions, build_design_context, coverage_lines as design_coverage_lines, design_items
+from .render.design import render_design
+from .testsuite import inventory_excludes
 from .flows import flow_entries, trace
 from .render.puml import (
     render_class_diagram, render_component_diagram, render_deployment_diagram, render_flow_diagram,
@@ -193,14 +197,8 @@ def _llm_context(args, cfg, ir):
             tried.append(f"{backend.name}: {exc}")
             continue
         print(f"  LLM: {label} (tier {tier}: {'; '.join(reasons)})")
-        t0 = time.monotonic()
-        try:
-            loaded = llm_backend.warm_up()
-        except BackendError as exc:
-            tried.append(f"{backend.name}: model failed to load within {backend.timeout}s ({exc})")
-            continue
-        if loaded is not None:
-            print(f"  model ready ({time.monotonic() - t0:.0f}s incl. load)")
+        # the model is loaded before the first request not answered from the
+        # response cache (LLMBackend.ensure_ready), so a cached rerun never loads it
         for t in tried:
             print(f"    (skipped {t})")
         state = _state_dir(args.output)
@@ -212,6 +210,7 @@ def _llm_context(args, cfg, ir):
             depth=args.depth, max_nodes=args.max_nodes, alias_path=alias_path,
             overlap=SourceIndex(args.repo, ir, cfg.overlap_min_words, cfg.overlap_mode),
             root=args.repo, calibration=Calibration.load(os.path.join(state, "calibration.json")),
+            cache=ResponseCache(os.path.join(state, "cache"), enabled=not getattr(args, "no_cache", False)),
         )
     print("  [SKIP] LLM outputs: no usable backend; writing the rest without it")
     for t in tried:
@@ -506,6 +505,9 @@ def _icd_sidecar(args, ir, ctx, path, llm) -> None:
 def _finish_llm(llm) -> None:
     if llm is not None:
         llm.aliases.save(llm.alias_path)
+        c = llm.cache
+        if c is not None and (c.hits or c.misses):
+            print(f"  model requests: {c.misses} sent, {c.hits} answered from the cache")
 
 
 def cmd_diagrams(args: argparse.Namespace) -> int:
@@ -541,6 +543,44 @@ def cmd_all(args: argparse.Namespace) -> int:
         diagrams = _generate_diagrams(ir, args, llm)
         if ir.interfaces:
             _generate_icd(ir, args, diagrams, llm)
+        if args.design:
+            _generate_design(ir, args, cfg, llm)
+    finally:
+        _finish_llm(llm)
+    return 0
+
+
+def _generate_design(ir, args, cfg, llm=None) -> None:
+    """Design description: summaries, behavior specifications, dependencies, tests."""
+    ir_all = extract_python(args.repo, exclude=inventory_excludes(cfg.exclude + args.exclude))
+    if llm is None:
+        print("  [SKIP] summaries, behavior specifications, test criteria: need an LLM "
+              "(--backend NAME or --model MODEL); writing the rest without them")
+    opts = DesignOptions(behavior=not args.no_behavior, summaries=not args.no_summaries,
+                         tests=not args.no_criteria, only=args.only, max_functions=args.max_functions)
+    generated = None if args.no_date else __import__("datetime").date.today().isoformat()
+    ctx = build_design_context(ir, ir_all, args.repo, llm, opts, generated, say=lambda s: print(f"  {s}"))
+    path = _write(os.path.join(args.output, "design", f"{ir.repo}_design.md"),
+                  render_design(ctx, args.design_template))
+    extra = {"llm": provenance.llm_header(llm)} if llm is not None else {}
+    provenance.write(path[: -len(".md")] + ".provenance.json",
+                     provenance.sidecar(_prov_header(args, ir), os.path.basename(path),
+                                        "deterministic + llm" if llm is not None else "deterministic",
+                                        design_items(ctx), ctx["requests"], **extra))
+    _write(os.path.join(args.output, "design", "manifest.json"), json.dumps(ctx["manifest"], indent=1))
+    _write(os.path.join(args.output, "design", "tests.json"), json.dumps(ctx["tests"], indent=1))
+    _write(os.path.join(args.output, "design_coverage.json"), json.dumps(ctx["coverage"], indent=1))
+    print(f"  wrote {path}")
+    for line in design_coverage_lines(ctx["coverage"]):
+        print(f"  {line}")
+
+
+def cmd_design(args: argparse.Namespace) -> int:
+    cfg = load_config(args.repo, extra=args.config)
+    ir = extract_python(args.repo, exclude=cfg.exclude + args.exclude)
+    llm = _llm_context(args, cfg, ir)
+    try:
+        _generate_design(ir, args, cfg, llm)
     finally:
         _finish_llm(llm)
     return 0
@@ -626,6 +666,8 @@ def _add_llm_opts(p: argparse.ArgumentParser) -> None:
     g.add_argument("--max-entries", type=int, default=3, help="Sequence diagrams to plan when no --entry")
     g.add_argument("--depth", type=int, default=3, help="Call-graph depth for sequence slices")
     g.add_argument("--max-nodes", type=int, default=25, help="Max functions per sequence slice")
+    g.add_argument("--no-cache", action="store_true",
+                   help="Ask the model again even where the same request was answered before")
 
 
 def _add_diagram_opts(p: argparse.ArgumentParser) -> None:
@@ -644,6 +686,19 @@ def _add_icd_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--template", default="lightweight", help="Bundled template name or path to a .j2 file")
     p.add_argument("--no-date", action="store_true", help="Omit the generation date (reproducible output)")
     p.add_argument("--narrative", action="store_true", help="Fill TBD descriptions with the LLM")
+
+
+def _add_design_opts(p: argparse.ArgumentParser, flag: bool = False) -> None:
+    g = p.add_argument_group("design description")
+    if flag:
+        g.add_argument("--design", action="store_true",
+                       help="Also write the design description (one model request per public function)")
+    g.add_argument("--no-behavior", action="store_true", help="No behavior specifications")
+    g.add_argument("--no-summaries", action="store_true", help="No module, package or system summaries")
+    g.add_argument("--no-criteria", action="store_true", help="No acceptance criteria for tests")
+    g.add_argument("--only", metavar="MODULE", help="Behavior specifications only under this module or package")
+    g.add_argument("--max-functions", type=int, help="At most this many behavior specifications")
+    g.add_argument("--design-template", default="lightweight", help="Bundled template name or a .j2 path")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -685,12 +740,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_llm_opts(p)
     p.set_defaults(func=cmd_icd)
 
-    p = sub.add_parser("all", help="Diagrams and ICDs from one extraction")
+    p = sub.add_parser("all", help="Diagrams and ICDs (and with --design, the design description)")
     _add_common(p)
     _add_diagram_opts(p)
     _add_icd_opts(p)
     _add_llm_opts(p)
+    _add_design_opts(p, flag=True)
     p.set_defaults(func=cmd_all)
+
+    p = sub.add_parser("design", help="Design description: summaries, behavior specs, dependencies, tests")
+    _add_common(p)
+    _add_llm_opts(p)
+    _add_design_opts(p)
+    p.add_argument("--no-date", action="store_true", help="Omit the generation date (reproducible output)")
+    p.set_defaults(func=cmd_design)
 
     p = sub.add_parser("eval", help="Evaluate accuracy against a reference and compare backends")
     _add_common(p)

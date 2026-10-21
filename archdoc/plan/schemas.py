@@ -95,3 +95,54 @@ def narrative_schema(operations: List[str], params: List[str]) -> Dict[str, Any]
             "params": params_schema,
         })},
     })
+
+
+def _refs_array(values: List[str], item: Dict[str, Any]) -> Dict[str, Any]:
+    """An array of {ref, ...}; must stay empty when the input offers no refs."""
+    out: Dict[str, Any] = {"type": "array", "items": item}
+    if not values:
+        out["maxItems"] = 0
+    return out
+
+
+_TEXT = {"type": "string"}
+_TEXTS = {"type": "array", "items": {"type": "string"}}
+
+
+def behavior_schema(function: List[str], params: List[str], calls: List[str], raises: List[str]) -> Dict[str, Any]:
+    """A behavior specification (DESIGN.md 2.3). Every input, side effect and
+    error names something the code shows: a parameter, a call, a raised type."""
+    return _obj({
+        "ref": _ref(function),
+        "purpose": {"type": "string", "minLength": 1},
+        "inputs": _refs_array(params, _obj({"name": _ref(params), "description": _TEXT})),
+        "returns": _TEXT,
+        "preconditions": _TEXTS,
+        "side_effects": _refs_array(calls, _obj({"ref": _ref(calls), "description": _TEXT})),
+        "errors": _refs_array(raises, _obj({"ref": _ref(raises), "when": _TEXT})),
+        "algorithm": _TEXTS,
+    })
+
+
+def module_summary_schema(members: List[str], collaborators: List[str], external: List[str]) -> Dict[str, Any]:
+    """A module summary (DESIGN.md 12.5); collaborators are only real import or call edges."""
+    return _obj({
+        "responsibility": {"type": "string", "minLength": 1},
+        "key_operations": _refs_array(members, _obj({"ref": _ref(members), "description": _TEXT})),
+        "collaborators": _refs_array(collaborators, _obj({"ref": _ref(collaborators), "role": _TEXT})),
+        "external": _refs_array(external, _obj({"ref": _ref(external), "role": _TEXT})),
+    })
+
+
+def group_summary_schema(parts: List[str], collaborators: List[str], external: List[str]) -> Dict[str, Any]:
+    """A package summary (parts = modules) or the system summary (parts = packages)."""
+    return _obj({
+        "responsibility": {"type": "string", "minLength": 1},
+        "parts": _refs_array(parts, _obj({"ref": _ref(parts), "role": _TEXT})),
+        "collaborators": _refs_array(collaborators, _obj({"ref": _ref(collaborators), "role": _TEXT})),
+        "external": _refs_array(external, _obj({"ref": _ref(external), "role": _TEXT})),
+    })
+
+
+def tests_schema(tests: List[str]) -> Dict[str, Any]:
+    return _obj({"tests": {"type": "array", "items": _obj({"ref": _ref(tests), "criterion": _TEXT})}})

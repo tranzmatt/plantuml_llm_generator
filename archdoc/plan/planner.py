@@ -7,7 +7,9 @@ The planner loop: payload -> backend -> validated, restored plan.
     4. artifact-specific semantic checks
     5. on any error, one repair round with the errors listed
 
-Every request and response is recorded in the egress log.
+Every request and response is recorded in the egress log. With a response
+cache (archdoc.cache), an attempt whose exact request was answered before is
+replayed from disk: nothing is sent, and the log records it as cached.
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import jsonschema
 
-from ..backends import BackendError, LLMBackend
+from ..backends import BackendError, Completion, LLMBackend
+from ..cache import ResponseCache, request_key
 from ..egress import EgressLog, Payload
 from ..ingress import accept
 from ..pseudonym import ALIAS_RE, AliasMap
@@ -58,6 +61,7 @@ class PlanResult:
     first_prompt_chars: int = 0
     first_prompt_tokens: Optional[int] = None
     overflow: bool = False
+    cached: int = 0                     # attempts answered from the response cache
 
     @property
     def ok(self) -> bool:
@@ -126,6 +130,7 @@ def run_plan(
     log: Optional[EgressLog] = None,
     repairs: int = 1,
     max_tokens: int = 2048,
+    cache: Optional[ResponseCache] = None,
 ) -> PlanResult:
     result = PlanResult(payload.artifact, payload_aliased=bool(ALIAS_RE.search(payload.text)))
     to_payload_terms = payload_terms(payload, aliases)
@@ -144,15 +149,22 @@ def run_plan(
         result.attempts = attempt
         errors: List[str] = []
         raw = ""
-        if backend.unavailable:
+        key = request_key(backend.model, getattr(backend, "digest", None), system, user, schema, max_tokens)
+        hit = cache.get(key) if cache is not None else None
+        if hit is None and backend.unavailable:
             result.errors = [f"skipped: backend unavailable earlier in this run ({backend.unavailable})"]
             return result
         try:
-            completion = backend.complete_json(system, user, schema, max_tokens=max_tokens)
+            if hit is not None:
+                completion = Completion(hit["text"], hit.get("prompt_tokens"), hit.get("completion_tokens"))
+                result.cached += 1
+            else:
+                backend.ensure_ready()
+                completion = backend.complete_json(system, user, schema, max_tokens=max_tokens)
             raw = completion.text
             result.prompt_tokens += completion.prompt_tokens or 0
             result.completion_tokens += completion.completion_tokens or 0
-            if attempt == 1:
+            if attempt == 1 and hit is None:
                 result.first_prompt_chars = len(system) + len(user)
                 result.first_prompt_tokens = completion.prompt_tokens
             window = getattr(backend, "window", None)
@@ -162,6 +174,8 @@ def run_plan(
                 result.errors = [f"the prompt filled the {window}-token window ({completion.prompt_tokens} "
                                  f"tokens) and was truncated by the server"]
                 return result
+            if hit is None and cache is not None:
+                cache.put(key, payload.artifact, raw, completion.prompt_tokens, completion.completion_tokens)
         except BackendError as exc:
             if exc.unavailable:
                 backend.unavailable = str(exc)
@@ -195,7 +209,7 @@ def run_plan(
                        response=raw if log.include_payload else None,
                        prompt_tokens=getattr(completion, "prompt_tokens", None),
                        completion_tokens=getattr(completion, "completion_tokens", None),
-                       seconds=getattr(completion, "seconds", None))
+                       seconds=getattr(completion, "seconds", None), cached=hit is not None)
         if not errors:
             result.plan, result.raw, result.errors = restored, obj, []
             return result

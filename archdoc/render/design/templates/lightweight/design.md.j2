@@ -1,0 +1,206 @@
+{#- Lightweight design description.
+    Signatures, the dependency manifest and the test inventory come from the
+    code. Summaries, behavior specifications and acceptance criteria are
+    model-written and carry the evidence they were written from. -#}
+# {{ title }}
+
+| | |
+|---|---|
+| System | `{{ repo }}` |
+| Generated | archdoc {{ version }}{% if generated %}, {{ generated }}{% endif %} |
+| Modules | {{ modules | length }} |
+| Public functions | {{ coverage.behavior.total }} ({{ coverage.behavior.total - coverage.behavior.none }} specified: {{ coverage.behavior.source }} from source, {{ coverage.behavior.outline }} from outline, {{ coverage.behavior.signature }} from signature only) |
+| Tests | {{ coverage.tests.total }} |
+
+> Signatures, dependencies and the test inventory are generated from the code
+> and are authoritative for the version analysed. Summaries, behavior
+> specifications and acceptance criteria marked *(generated)* were drafted by a
+> language model{% if aliased %} that saw pseudonymized identifiers only{% endif %} and should be reviewed. Each
+> specification says what it was written from: *source* (the function's code),
+> *outline* (its control flow) or *signature* (its signature, docstring and
+> calls only, so the behavior is inferred). Specifications marked *(from the
+> code)* describe functions simple enough to state exactly without a model.
+> Items marked **TBD** have no specification yet.
+
+## 1. System overview
+
+{% if system %}
+{{ system.responsibility }} *(generated)*
+{% if system.parts %}
+
+| Part | Role |
+|------|------|
+{% for p in system.parts -%}
+| {{ p.ref | code }} | {{ p.role | cell }} |
+{% endfor %}
+{% endif %}
+{% if system.external %}
+
+External dependencies: {% for e in system.external %}{{ e.ref | code }}{% if e.role %} ({{ e.role }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}.
+{% endif %}
+{% else %}
+**TBD**
+{% endif %}
+
+## 2. Packages
+{% for p in packages %}
+
+<a id="{{ p.anchor }}"></a>
+### 2.{{ loop.index }} {{ p.id | code }}
+
+{% if p.summary %}
+{{ p.summary.responsibility }} *(generated{% if p.summary.get('same_as') %}; single module{% endif %})*
+{% for x in p.summary.parts %}
+- {{ x.ref | code }}: {{ x.role | cell }}
+{% endfor %}
+{% else %}
+**TBD**
+{% endif %}
+{% else %}
+
+No package summaries (no model, or `--no-summaries`).
+{% endfor %}
+
+## 3. Modules
+{% for m in modules %}
+
+<a id="{{ m.anchor }}"></a>
+### 3.{{ loop.index }} {{ m.id | code }}
+
+| | |
+|---|---|
+| File | {{ m.path | code }} |
+| Docstring | {{ m.doc | cell }} |
+| Responsibility | {% if m.summary %}{{ m.summary.responsibility | cell }} *(generated)*{% else %}**TBD**{% endif %} |
+{% if m.summary and m.summary.collaborators %}
+| Collaborators | {% for c in m.summary.collaborators %}{{ c.ref | code }}{% if c.role %} ({{ c.role | cell }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %} |
+{% endif %}
+{% if m.summary and m.summary.external %}
+| External | {% for c in m.summary.external %}{{ c.ref | code }}{% if c.role %} ({{ c.role | cell }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %} |
+{% endif %}
+{% if m.summary and m.summary.key_operations %}
+
+Key operations:
+{% for k in m.summary.key_operations %}
+- {{ k.ref | code }}: {{ k.description | cell }}
+{% endfor %}
+{% endif %}
+{% for f in m.functions %}
+
+<a id="{{ f.anchor }}"></a>
+#### {{ f.name | code }}
+
+{{ f.signature | code }}
+
+{% if f.evidence %}
+{{ f.purpose | tbd }} {{ f | evidence }}
+{% if f.inputs %}
+
+| Input | Type | Description |
+|-------|------|-------------|
+{% for i in f.inputs -%}
+| {{ i.name | code }} | {{ i.type | code }} | {{ i.description | cell }} |
+{% endfor %}
+{% endif %}
+{% if f.returns %}
+
+**Returns:** {{ f.returns }}
+{% endif %}
+{% if f.preconditions %}
+
+**Preconditions:**
+{% for p in f.preconditions %}
+- {{ p }}
+{% endfor %}
+{% endif %}
+{% if f.side_effects %}
+
+**Side effects:**
+{% for s in f.side_effects %}
+- {{ s.description }} ({{ s.ref | code }})
+{% endfor %}
+{% endif %}
+{% if f.errors %}
+
+| Error | When |
+|-------|------|
+{% for e in f.errors -%}
+| {{ e.ref | code }} | {{ e.when | cell }} |
+{% endfor %}
+{% endif %}
+{% if f.algorithm %}
+
+**Algorithm:**
+{% for a in f.algorithm %}
+{{ loop.index }}. {{ a }}
+{% endfor %}
+{% endif %}
+{% else %}
+{% if f.doc %}{{ f.doc }} *(docstring)*
+
+{% endif %}
+Behavior: **TBD**
+{% if f.failed %}
+(The model's answer was rejected: {{ f.failed }})
+{% endif %}
+{% endif %}
+{% if f.tested_by %}
+
+Tested by: {% for t in f.tested_by %}{{ t | code }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}
+{% endfor %}
+{% endfor %}
+
+## 4. Dependencies
+
+{% if manifest.requirements %}
+| Package | Version | Declared in | Group |
+|---------|---------|-------------|-------|
+{% for r in manifest.requirements -%}
+| {{ r.name | code }} | {{ r.spec | code }} | {{ (r.file ~ ':' ~ r.line) | code }} | {{ r.group | cell }} |
+{% endfor %}
+{% else %}
+No requirements files, `pyproject.toml`, `setup.cfg` or Dockerfile `pip install` lines found.
+{% endif %}
+{% if manifest.imports %}
+
+Third-party imports:
+
+| Import | Used by |
+|--------|---------|
+{% for name, mods in manifest.imports | dictsort -%}
+| {{ name | code }} | {{ mods | cell }} |
+{% endfor %}
+{% endif %}
+{% if manifest.issues %}
+
+Declaration and use disagree:
+
+| Package | Where | Issue |
+|---------|-------|-------|
+{% for i in manifest.issues -%}
+| {{ i.package | code }} | {{ i.where | cell }} | {{ i.issue | cell }} |
+{% endfor %}
+{% endif %}
+
+## 5. Test inventory
+
+{% if tests %}
+| Test | Exercises | Expects | Asserts | Acceptance criterion |
+|------|-----------|---------|--------:|----------------------|
+{% for t in tests -%}
+| {{ (t.path ~ ':' ~ t.line) | code }} {{ t.name | code }}{% if t.cases %} ×{{ t.cases }}{% endif %}{% if t.markers %} ({{ t.markers | join(', ') }}){% endif %} | {{ t.exercises | cell }} | {{ t.expects | cell }} | {{ t.asserts }} | {% if t.criterion %}{{ t.criterion | cell }}{% if t.criterion_generated %} *(generated)*{% endif %}{% elif t.doc %}{{ t.doc | cell }} *(docstring)*{% else %}**TBD**{% endif %} |
+{% endfor %}
+{% else %}
+No tests found.
+{% endif %}
+
+## Appendix A. Coverage
+
+| | |
+|---|---|
+| Behavior specifications | {{ coverage.behavior.total - coverage.behavior.none }} of {{ coverage.behavior.total }} public functions: {{ coverage.behavior.source }} from source, {{ coverage.behavior.outline }} from outline, {{ coverage.behavior.signature }} from signature only |
+| Module summaries | {{ coverage.summaries.modules }} of {{ coverage.summaries.of }} |
+| Tests | {{ coverage.tests.total }}, {{ coverage.tests.with_criterion }} with a generated criterion |
+| Public functions exercised directly by a test | {{ coverage.tests.functions_exercised }} of {{ coverage.tests.of }} |
+| Dependency issues | {{ coverage.dependencies.issues }} |
