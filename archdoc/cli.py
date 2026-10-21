@@ -22,7 +22,10 @@ from .plan.artifacts import PlanContext, plan_narrative, plan_sequence
 from .plan.entries import select_entries
 from .render.icd import anchor, apply_narrative, build_icd_context, inventory_snapshot, render_icd
 from .render.puml.sequence import render_sequence_diagram
-from .render.puml import render_class_diagram, render_component_diagram, render_deployment_diagram
+from .flows import flow_entries, trace
+from .render.puml import (
+    render_class_diagram, render_component_diagram, render_deployment_diagram, render_flow_diagram,
+)
 from .render.puml.class_ import partition_modules
 from .validate import check_syntax, plantuml_command
 from .trust import CLOUD, TIERS, Backend, TrustError, classify
@@ -118,7 +121,7 @@ def cmd_egress(args: argparse.Namespace) -> int:
     return 0
 
 
-DETERMINISTIC_DIAGRAMS = ("class", "component", "deployment")
+DETERMINISTIC_DIAGRAMS = ("class", "component", "deployment", "flow")
 PLANNED_DIAGRAMS = ("sequence",)
 LLM_DIAGRAMS = PLANNED_DIAGRAMS + ("activity", "state", "usecase", "object")
 DEFAULT_URLS = {"ollama": "http://localhost:11434"}
@@ -273,6 +276,18 @@ def _diagram_files(ir, types, depth, max_classes, members):
             stem = f"{ir.repo}_deployment_{re.sub(r'[^A-Za-z0-9]+', '_', dep.file.rsplit('.', 1)[0]).strip('_')}"
             out.append((stem, f"{ir.repo}: deployment ({dep.file})",
                         render_deployment_diagram(ir, dep, stem, title=f"Deployment: {dep.file}")))
+    if "flow" in types:
+        # one cross-service sequence per user-facing entry, per deployment file (or the repo)
+        for dep in ir.deployments or [None]:
+            where = dep.file if dep else "repository"
+            dslug = re.sub(r"[^A-Za-z0-9]+", "_", dep.file.rsplit(".", 1)[0]).strip("_") if dep else "repo"
+            for iface, op in flow_entries(ir, dep):
+                eslug = re.sub(r"[^A-Za-z0-9]+", "_", f"{iface.owner}_{op.name}").strip("_")
+                stem = f"{ir.repo}_flow_{dslug}_{eslug}"
+                client = "User" if iface.kind in ("ui", "cli") else "Client"
+                out.append((stem, f"{ir.repo}: {op.name} across services ({where})",
+                            render_flow_diagram(trace(ir, iface, op, dep), stem, dep,
+                                                title=f"{iface.name}: {op.name} ({where})", client=client)))
     return out
 
 
@@ -482,8 +497,8 @@ def _add_llm_opts(p: argparse.ArgumentParser) -> None:
 
 
 def _add_diagram_opts(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--types", default="class,component,deployment",
-                   help="Comma-separated: class, component, deployment (no LLM); sequence (LLM)")
+    p.add_argument("--types", default="class,component,deployment,flow",
+                   help="Comma-separated: class, component, deployment, flow (no LLM); sequence (LLM)")
     p.add_argument("--component-depth", type=int, help="Package depth for components (default: auto)")
     p.add_argument("--max-classes", type=int, default=60,
                    help="Above this many classes, write one class diagram per component")

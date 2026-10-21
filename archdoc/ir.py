@@ -62,6 +62,7 @@ class Function:
     visibility: str = "public"         # public | protected | private
     docstring: Optional[str] = None
     calls: List[str] = field(default_factory=list)     # resolved function ids or ext:..., source order
+    call_lines: Dict[str, int] = field(default_factory=dict)   # call target -> line of its first call
     creates: List[str] = field(default_factory=list)   # class ids instantiated, source order
     raises: List[str] = field(default_factory=list)    # class ids, ext:..., or builtin names
 

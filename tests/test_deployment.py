@@ -71,3 +71,45 @@ def test_deployment_diagram(ir):
     assert "worker.extra.replay" not in text
     if plantuml_command():
         assert check_syntax(text).ok
+
+
+# -- cross-service flows ------------------------------------------------------------
+
+from archdoc.flows import flow_entries, trace  # noqa: E402
+from archdoc.render.puml.flow import render_flow_diagram  # noqa: E402
+
+
+def test_flow_trace(ir):
+    (dep,) = ir.deployments
+    (entry,) = flow_entries(ir, dep)
+    assert entry[1].name == "click Ask"
+    flow = trace(ir, *entry, dep)
+    steps = [(s.kind, s.src, s.dst, s.channel) for s in flow.steps]
+    assert steps == [
+        ("invoke", "@client", "ui", None),
+        ("publish", "ui", "@broker", "queue jobs"),
+        ("deliver", "@broker", "worker", "queue jobs"),
+        ("publish", "worker", "@broker", "exchange results"),          # source order in handle()
+        ("deliver", "@broker", "ui", "exchange results"),              # the UI's poll; not walked again
+        ("publish", "worker", "@broker", "queue audit"),
+        ("unconsumed", "@broker", None, "queue audit"),
+    ]
+    assert flow.broker == "broker" and flow.participants == ["ui", "worker"]
+    assert flow.steps[1].fields == ["request_id", "text"]
+
+
+def test_flow_without_deployment_uses_packages(ir):
+    (entry,) = flow_entries(ir)
+    flow = trace(ir, *entry)
+    # worker.extra.replay is not on the path: nothing it does follows from the UI
+    assert flow.participants == ["ui", "worker"] and flow.broker == "RabbitMQ"
+
+
+def test_flow_diagram(ir):
+    (dep,) = ir.deployments
+    text = render_flow_diagram(trace(ir, *flow_entries(ir, dep)[0], dep), "f", dep)
+    assert 'queue "broker (rabbitmq:3-management)" as B_broker' in text
+    assert "S_svc_ui -> B_broker : publish jobs\\n{request_id, text}" in text
+    assert "note over B_broker #FFDDDD : audit: no consumer deployed" in text
+    if plantuml_command():
+        assert check_syntax(text).ok

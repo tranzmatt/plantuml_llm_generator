@@ -521,6 +521,7 @@ supply a neutral description that is sent instead of the real name.
 | class | deterministic | classes, bases, fields, methods; composition from field types |
 | component | deterministic | module import graph by package; **provided/required interfaces** from the inventory as lollipop/socket notation; message interfaces drawn as the broker's queues/exchanges with publisher → channel → consumer arrows |
 | deployment | deterministic (compose files) | services and the modules each image contains; message flows through the broker's service. Repos without deployment files: LLM planner later (entrypoints, IO categories, env var names) |
+| flow (cross-service sequence) | deterministic | from each UI/HTTP/CLI operation: the handler's internal calls in source order to each publish, through the broker to every deployed consumer, on from each consumer's callback; fanout as `par`; a publish with no deployed consumer ends in a note naming any consumer the deployment leaves out. One per entry per deployment file. Source order, not run-time order: branches, retries and loops are not shown, and the legend says so |
 | object | LLM planner | data types with fields, constructor signatures |
 | state | LLM planner | enums, `status`/`state` fields, transition-named methods |
 | use-case | LLM planner | provided interfaces (routes, CLI commands, tasks), required interfaces as actors |

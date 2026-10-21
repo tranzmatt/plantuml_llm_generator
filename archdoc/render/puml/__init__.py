@@ -3,5 +3,6 @@
 from .class_ import render_class_diagram
 from .component import render_component_diagram
 from .deployment import render_deployment_diagram
+from .flow import render_flow_diagram
 
-__all__ = ["render_class_diagram", "render_component_diagram", "render_deployment_diagram"]
+__all__ = ["render_class_diagram", "render_component_diagram", "render_deployment_diagram", "render_flow_diagram"]

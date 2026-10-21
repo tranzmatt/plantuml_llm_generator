@@ -26,6 +26,7 @@ class End:
     handler: Optional[str]
     routing_key: Optional[str]
     fields: List[str]
+    line: Optional[int] = None
 
 
 @dataclass
@@ -58,7 +59,7 @@ def channels(ir: RepoIR) -> List[Channel]:
             key = f"mq:{broker}:{target}:{name}" + (f":{iface.owner}" if name == RUNTIME else "")
             ch = found.setdefault(key, Channel(broker, target, name, key, op.meta.get("exchange_type")))
             ch.exchange_type = ch.exchange_type or op.meta.get("exchange_type")
-            end = End(iface.owner, op.id, op.handler, op.meta.get("routing_key"), [p.name for p in op.params])
+            end = End(iface.owner, op.id, op.handler, op.meta.get("routing_key"), [p.name for p in op.params], op.line)
             (ch.publishers if op.meta.get("role") == "publish" else ch.consumers).append(end)
     return [found[k] for k in sorted(found)]
 

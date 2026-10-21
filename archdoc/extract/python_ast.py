@@ -784,6 +784,9 @@ def _resolve_bodies(res: Resolver) -> None:
                         raises.add(dn)
             ordered.sort()
             fnode.fn.calls = list(dict.fromkeys(t for _, _, k, t in ordered if k == "call"))
+            for line, _, k, t in ordered:
+                if k == "call":
+                    fnode.fn.call_lines.setdefault(t, line)
             fnode.fn.creates = list(dict.fromkeys(t for _, _, k, t in ordered if k == "create"))
             fnode.fn.raises = sorted(raises)
 

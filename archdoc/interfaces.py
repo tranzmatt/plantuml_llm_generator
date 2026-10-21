@@ -32,6 +32,7 @@ class Operation:
     handler: Optional[str] = None      # Function id
     docstring: Optional[str] = None
     meta: Dict[str, str] = field(default_factory=dict)    # e.g. {"status_code": "201"}
+    line: Optional[int] = None         # where the operation is defined or performed, in its handler's module
 
 
 @dataclass

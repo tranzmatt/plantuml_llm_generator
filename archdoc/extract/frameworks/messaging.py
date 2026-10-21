@@ -54,6 +54,7 @@ class _Endpoint:
     handler: Optional[str] = None
     meta: Dict[str, str] = field(default_factory=dict)
     fields: List[str] = field(default_factory=list)
+    line: Optional[int] = None
 
     @property
     def key(self) -> Tuple[str, str, str, Optional[str]]:
@@ -129,6 +130,7 @@ def _scope_endpoints(ctx: ExtractContext, pm: ParsedModule, handler: Optional[st
     out: List[_Endpoint] = []
     for call in _pika_calls(body):
         m = call.func.attr
+        start = len(out)
         if m == "queue_bind":
             queue, exchange = _arg(call, 0, "queue"), _const(_arg(call, 1, "exchange"))
             if queue is not None and exchange:
@@ -165,6 +167,8 @@ def _scope_endpoints(ctx: ExtractContext, pm: ParsedModule, handler: Optional[st
                                          {**meta, "queue": "exclusive, server-named"}, fields))
             else:
                 out.append(_Endpoint("consume", "queue", RUNTIME, None, reader, meta, fields))
+        for ep in out[start:]:
+            ep.line = call.lineno
     return out
 
 
@@ -181,7 +185,7 @@ def _exchange_types(ctx: ExtractContext) -> Dict[str, str]:
     return types
 
 
-def _operation(iface_id: str, ep: _Endpoint, exchange_types: Dict[str, str]) -> Operation:
+def _operation(iface_id: str, ep: _Endpoint, exchange_types: Dict[str, str], by_handler: bool) -> Operation:
     where = f"{ep.target} {ep.name}"
     meta = {"role": ep.role, ep.target: ep.name, **ep.meta}
     if ep.target == "exchange" and ep.name in exchange_types:
@@ -189,12 +193,15 @@ def _operation(iface_id: str, ep: _Endpoint, exchange_types: Dict[str, str]) -> 
     if ep.routing_key is not None and ep.routing_key != "":
         meta["routing_key"] = ep.routing_key
     key = f" [{ep.routing_key}]" if ep.routing_key not in (None, "", RUNTIME) else ""
+    handler_name = (ep.handler or "<module>").rsplit(":", 1)[-1]
+    suffix = f" (in {handler_name})" if by_handler else ""
     return Operation(
-        id=f"{iface_id}:{ep.role}:{ep.target}:{ep.name}{key}",
-        name=f"{ep.role} {where}{key}",
+        id=f"{iface_id}:{ep.role}:{ep.target}:{ep.name}{key}" + (f":{handler_name}" if by_handler else ""),
+        name=f"{ep.role} {where}{key}{suffix}",
         params=[Field(name=f) for f in ep.fields],
         handler=ep.handler,
         meta=meta,
+        line=ep.line,
     )
 
 
@@ -205,14 +212,17 @@ def detect_pika(ctx: ExtractContext) -> None:
             continue
         fn_nodes = {f.fn.id: f.node for f in pm.funcs}
         scopes = [(None, pm.tree.body)] + [(f.fn.id, f.node.body) for f in pm.funcs]
+        # one operation per destination and handler: the same queue used twice in a
+        # function is one operation (fields unioned); used by two functions, two
         merged: Dict[tuple, _Endpoint] = {}
         for handler, body in scopes:
             for ep in _scope_endpoints(ctx, pm, handler, body, fn_nodes):
-                seen = merged.get(ep.key)
+                seen = merged.get((ep.key, ep.handler))
                 if seen is None:
-                    merged[ep.key] = ep
-                else:                      # the same destination used twice: keep one, union the fields
+                    merged[(ep.key, ep.handler)] = ep
+                else:
                     seen.fields += [f for f in ep.fields if f not in seen.fields]
+        shared = {k for k, _ in merged if sum(1 for k2, _ in merged if k2 == k) > 1}
         for role, direction in (("consume", "provided"), ("publish", "required")):
             eps = [e for e in merged.values() if e.role == role]
             if not eps:
@@ -222,6 +232,6 @@ def detect_pika(ctx: ExtractContext) -> None:
                 id=iface_id,
                 name=f"{pm.id} {'consumes' if role == 'consume' else 'publishes'}",
                 kind="message", direction=direction, owner=pm.id, protocol="AMQP (RabbitMQ, pika)",
-                operations=[_operation(iface_id, e, exchange_types) for e in eps],
+                operations=[_operation(iface_id, e, exchange_types, e.key in shared) for e in eps],
                 source_refs=[pm.module.path],
             ))
