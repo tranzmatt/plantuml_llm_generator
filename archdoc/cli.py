@@ -17,7 +17,7 @@ from .coverage import coverage_lines, icd_coverage
 from .egress import EgressAborted, EgressLog, build_payload, estimate_tokens
 from .extract import extract_python
 from .extract.python_ast import collect_python_files
-from .policy import PolicyError, load_config
+from .policy import PRIVACY, PolicyError, load_config, policy_tier
 from .pseudonym import AliasMap
 from .plan.artifacts import (
     PlanContext, check_sequence, plan_activity, plan_narrative, plan_sequence, plan_usecase,
@@ -49,7 +49,7 @@ from .render.puml import (
 )
 from .render.puml.class_ import partition_modules
 from .validate import check_syntax, plantuml_command
-from .trust import CLOUD, TIERS, Backend, TrustError, classify
+from .trust import CLOUD, LOCAL, TIERS, Backend, TrustError, classify
 
 
 def _state_dir(output: str) -> str:
@@ -95,6 +95,9 @@ def cmd_egress(args: argparse.Namespace) -> int:
         label = f"{backend.name} ({backend.model or '?'} @ {backend.url or 'in-process'})"
     else:
         tier, reasons, label = args.trust, ["set with --trust"], f"--trust {args.trust}"
+    privacy = args.privacy or cfg.privacy_cloud
+    if policy_tier(tier, privacy) != tier:
+        tier, reasons = LOCAL, reasons + ["privacy off: sent what a local model would get"]
 
     exclude = cfg.exclude + args.exclude
     ir = extract_python(args.repo, exclude=exclude)
@@ -208,7 +211,10 @@ def _llm_context(args, cfg, ir):
         except BackendError as exc:
             tried.append(f"{backend.name}: {exc}")
             continue
+        privacy = getattr(args, "privacy", None) or cfg.privacy_cloud
         print(f"  LLM: {label} (tier {tier}: {'; '.join(reasons)})")
+        if policy_tier(tier, privacy) != tier:
+            print("  privacy OFF: the cloud model is sent real names and source")
         # the model is loaded before the first request not answered from the
         # response cache (LLMBackend.ensure_ready), so a cached rerun never loads it
         for t in tried:
@@ -216,9 +222,9 @@ def _llm_context(args, cfg, ir):
         state = _state_dir(args.output)
         alias_path = os.path.join(state, "alias_map.json")
         return PlanContext(
-            ir=ir, config=cfg, tier=tier, aliases=AliasMap.load(alias_path),
+            ir=ir, config=cfg, tier=policy_tier(tier, privacy), aliases=AliasMap.load(alias_path),
             backend=llm_backend,
-            log=EgressLog(os.path.join(state, "egress.jsonl")),
+            log=EgressLog(os.path.join(state, "egress.jsonl"), context={"model_tier": tier, "privacy": privacy}),
             depth=args.depth, max_nodes=args.max_nodes, alias_path=alias_path,
             overlap=SourceIndex(args.repo, ir, cfg.overlap_min_words, cfg.overlap_mode),
             root=args.repo, calibration=Calibration.load(os.path.join(state, "calibration.json")),
@@ -810,26 +816,34 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 
 def cmd_serve_mcp(args: argparse.Namespace) -> int:
-    """MCP server on stdio for coding-agent harnesses (DESIGN.md 13)."""
-    from .harness import HarnessSession
-    from .mcp_server import serve_stdio
+    """MCP server on stdio for coding-agent harnesses (DESIGN.md 13).
+
+    With no repo it waits for the agent's open_project: add it to a harness
+    once and use it for any repo. Each repo's own config decides its privacy."""
+    from .harness import open_session
+    from .mcp_server import Server, serve_stdio
 
     env = os.environ
-    args.repo = args.repo or env.get("ARCHDOC_REPO")
-    args.out = args.out or env.get("ARCHDOC_OUT") or "archdoc_out"
-    args.trust = args.trust or env.get("ARCHDOC_TRUST") or CLOUD
-    args.config = args.config or env.get("ARCHDOC_CONFIG")
-    args.window = args.window or int(env.get("ARCHDOC_WINDOW") or 32768)
-    if args.trust not in TIERS:
-        raise PolicyError(f"trust tier {args.trust!r}: use {' or '.join(TIERS)}")
-    if not args.repo or not os.path.isdir(args.repo):
-        raise PolicyError(f"repo {args.repo!r}: not a directory (--repo or ARCHDOC_REPO)")
-    session = HarnessSession(args.repo, args.out, trust=args.trust, config=args.config, exclude=args.exclude,
-                             window=args.window, max_entries=args.max_entries, template=args.template,
-                             design_template=args.design_template, embed=args.embed)
-    print(f"archdoc MCP server: {os.path.abspath(args.repo)} -> {os.path.abspath(args.out)} "
-          f"(tier {args.trust})", file=sys.stderr)
-    serve_stdio(session)
+    repo = args.repo or env.get("ARCHDOC_REPO")
+    claimed = args.trust or env.get("ARCHDOC_TRUST")
+    if claimed and claimed not in TIERS:
+        raise PolicyError(f"trust tier {claimed!r}: use {' or '.join(TIERS)}")
+    window = args.window or (int(env["ARCHDOC_WINDOW"]) if env.get("ARCHDOC_WINDOW") else None)
+
+    def opener(path: str, out: Optional[str]):
+        return open_session(path, out or args.out or env.get("ARCHDOC_OUT"),
+                            config=args.config or env.get("ARCHDOC_CONFIG"), claimed=claimed, window=window,
+                            exclude=args.exclude, max_entries=args.max_entries, template=args.template,
+                            design_template=args.design_template, embed=args.embed)
+
+    if repo:
+        session = opener(repo, None)
+        print(f"archdoc MCP server: {session.repo} -> {session.output}; {session.status}", file=sys.stderr)
+        server = Server(session)
+    else:
+        print("archdoc MCP server: waiting for open_project", file=sys.stderr)
+        server = Server(opener=opener)
+    serve_stdio(server)
     return 0
 
 
@@ -871,6 +885,7 @@ def _add_llm_opts(p: argparse.ArgumentParser) -> None:
     g.add_argument("--num-ctx", type=int, help="Ollama context window (default 8192)")
     g.add_argument("--trust", choices=TIERS,
                    help="Ad-hoc: declared tier (undeclared = cloud). Named backend: 'cloud' forces aliasing")
+    g.add_argument("--privacy", choices=PRIVACY, help=_PRIVACY_HELP)
     g.add_argument("--entry", action="append", default=[],
                    help="Sequence entry: handler id (pkg.mod:func) or operation id (repeatable)")
     g.add_argument("--max-entries", type=int, default=3, help="Sequence diagrams to plan when no --entry")
@@ -922,6 +937,10 @@ def _add_design_opts(p: argparse.ArgumentParser, flag: bool = False) -> None:
     g.add_argument("--design-template", default="lightweight", help="Bundled template name or a .j2 path")
 
 
+_PRIVACY_HELP = ("For a cloud model: 'on' sends aliases and no source; 'off' sends what a local model gets, "
+                 "for code that needs no protecting [default: the repo's [privacy] cloud, else on]")
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="archdoc", description=__doc__)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -940,6 +959,7 @@ def build_parser() -> argparse.ArgumentParser:
     who = p.add_mutually_exclusive_group(required=True)
     who.add_argument("--backend", help="Backend name from config; its trust tier is verified")
     who.add_argument("--trust", choices=TIERS, help="Assume this tier without a backend")
+    p.add_argument("--privacy", choices=PRIVACY, help=_PRIVACY_HELP)
     p.add_argument("-o", "--output", default="archdoc_out", help="Output directory (alias map, preview)")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB")
     p.add_argument("--scope", help="Only modules under this package, e.g. 'shop.api'")
@@ -987,14 +1007,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("serve-mcp", help="MCP server (stdio) for opencode, Mistral Vibe and other harnesses")
     # each setting can also come from the environment (ARCHDOC_REPO, ...): harness
     # profiles use that, so the command line a harness may show the model names nothing
-    p.add_argument("--repo", help="Repository to document, fixed for the session [ARCHDOC_REPO]")
-    p.add_argument("--out", help="Output directory, fixed for the session [ARCHDOC_OUT; default archdoc_out]")
+    p.add_argument("--repo", help="Fix the server to this repository [ARCHDOC_REPO; default: the agent "
+                                  "opens one with open_project]")
+    p.add_argument("--out", help="Output directory, relative to the repo [ARCHDOC_OUT; default "
+                                 "[harness] out, else archdoc_out]")
     p.add_argument("--trust", choices=TIERS,
-                   help="Tier of the harness's model [ARCHDOC_TRUST]; default cloud (pseudonymized, call graph only)")
+                   help="Where the harness's model runs, if it cannot be detected [ARCHDOC_TRUST; default "
+                        "[harness] model, else cloud]. A model detected as cloud is cloud whatever this says")
     p.add_argument("--config", help="Extra config TOML (overrides user and repo config) [ARCHDOC_CONFIG]")
     p.add_argument("--exclude", action="append", default=[], metavar="GLOB")
     p.add_argument("--window", type=int, help="Context window to pack requests for, in tokens "
-                                              "[ARCHDOC_WINDOW; default 32768]")
+                                              "[ARCHDOC_WINDOW; default [harness] window, else 8192 for "
+                                              "a local model and 32768 for a cloud one]")
     p.add_argument("--max-entries", type=int, default=3, help="Sequence diagrams to plan")
     p.add_argument("--template", default="lightweight", help="ICD template")
     p.add_argument("--design-template", default="lightweight", help="Design description template")

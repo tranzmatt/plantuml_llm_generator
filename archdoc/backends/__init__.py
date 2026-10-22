@@ -217,6 +217,21 @@ def ollama_remote_host(url: str, model: str, timeout: int = 10) -> Optional[str]
     return None
 
 
+def ollama_model_location(url: str, model: str, timeout: int = 5) -> Optional[str]:
+    """"local", the remote host Ollama proxies `model` to, or None if the daemon
+    cannot be asked or does not list the model (then nothing is known)."""
+    try:
+        with urllib.request.urlopen(f"{url.rstrip('/')}/api/tags", timeout=timeout) as resp:
+            models = json.loads(resp.read()).get("models", [])
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    names = {model, model if ":" in model else model + ":latest"}
+    for m in models:
+        if names & {m.get("name"), m.get("model")}:
+            return m.get("remote_host") or "local"
+    return None
+
+
 def make_backend(cfg: Backend, temperature: float = 0.0) -> LLMBackend:
     if cfg.kind == "ollama":
         return OllamaBackend(cfg, temperature)

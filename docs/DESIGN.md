@@ -944,29 +944,58 @@ parts:
 
 ### 13.2 Trust in harness mode
 
-The MCP server cannot see which model the harness is using, so the tier is a launch
-argument: `archdoc serve-mcp --repo ... --out ... --trust local|cloud`.
-**If omitted, `cloud` is assumed.**
+The MCP server does not talk to the agent's model; the harness does. Two
+settings decide what the agent is sent:
 
-Ship paired profiles, each launching the server with the matching tier:
+- **Where the model runs** (`local | cloud`). Detected where the harness's
+  environment shows it, which is what `ollama launch` provides:
+  - Claude Code: `ANTHROPIC_BASE_URL` and the model aliases
+    (`ANTHROPIC_DEFAULT_*_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`), recognized by
+    `CLAUDE_PROJECT_DIR` (`CLAUDECODE` is inherited by any shell started from
+    Claude Code, so it says nothing about the harness);
+  - opencode: the model and its provider's `baseURL` in
+    `OPENCODE_CONFIG_CONTENT`.
 
-| Profile | Model | Server launched with |
-|---------|-------|----------------------|
-| `archdoc-local` | local provider only | `--trust local` |
-| `archdoc-cloud` | any provider | `--trust cloud` |
+  A model is local only when its endpoint is a local address and Ollama there
+  lists it without a `remote_host`. A cloud name pattern (`*:cloud`, `*-cloud`)
+  or a `remote_host` makes it cloud, so a cloud model copied under a plain name
+  is still caught. A local endpoint that is not Ollama could be a gateway to a
+  cloud API, and so counts as unknown. When the model is unknown, the user's
+  claim decides (`--trust` / `ARCHDOC_TRUST`, else `[harness] model`), and the
+  default is cloud. A claim of local never overrides a model detected as cloud,
+  and a claim of cloud always holds.
+- **Privacy** (`[privacy] cloud = "on" | "off"`). It says whether this repo is
+  protected from a cloud model. `on` (the default) builds requests with the
+  cloud policy (aliases, no source). `off` gives a cloud model what a local one
+  gets, for code that needs no protecting. Only the repo's own `.archdoc.toml`
+  or an explicit `--config` file can turn it off; the user config is refused, so
+  that one forgotten switch cannot apply to every repo. The agent can never set
+  it.
 
-**Pitfall:** harnesses let you switch models mid-session. If you switch an
-`archdoc-local` session to a cloud model, real names start flowing to the cloud.
-Mitigations: in the local profile, restrict the harness's enabled providers to local
-ones (both harnesses have provider enable/disable settings; confirm keys in Phase 5),
-and document the rule "switch profile, not model".
+The policy a request is built with follows from the two (`policy_tier`): local
+for a local model, or for a cloud model with privacy off; otherwise cloud. Every
+tool result starts with an `archdoc` status line (for example
+`model claude with nemotron-3-super:cloud: cloud (detected) | privacy ON:
+identifiers are aliased and no source is sent`). The egress log records
+`model_tier` and `privacy` beside the policy `tier` of every entry. The CLI has
+the same switch (`--privacy`, or the repo's `[privacy]`).
+
+**Pitfall:** detection happens once, at startup. A model switched mid-session
+(Claude Code's `/model`, opencode's model picker) is not seen. For a private repo,
+use privacy on unless the harness is pinned to a local model, as the
+`harness-init` profiles are (13.4).
 
 ### 13.3 MCP tools
 
-Repo root, policy, output directory and tier are fixed at launch, never passed as
-tool arguments. They travel in the server's environment (`ARCHDOC_REPO`,
-`ARCHDOC_OUT`, `ARCHDOC_TRUST`, `ARCHDOC_WINDOW`, `ARCHDOC_CONFIG`) rather than on
-its command line, because Vibe echoes the command line into every tool result and
+The server is added to a harness once and used for any repo. The agent opens
+one with `open_project(repo, out?)`, passing the path the user gave it. The
+repo's own config then decides its privacy, output directory (`[harness] out`,
+relative to the repo, default `archdoc_out`) and window (`[harness] window`,
+default 8192 for a local model and 32768 for a cloud one). Privacy and tier are
+never tool arguments. A server started with a repo (`--repo` or `ARCHDOC_REPO`,
+as the `harness-init` profiles do) is fixed to it and refuses another. Those
+profiles pass their settings in the server's environment rather than on its
+command line, because Vibe echoes the command line into every tool result and
 the repo path would tell a cloud model the repo's name.
 
 **The agent is the model.** Rather than one submit tool per artifact, the server
@@ -979,6 +1008,7 @@ the overlap guard. Nothing about validation is duplicated per tool.
 
 | Tool | Returns |
 |------|---------|
+| `open_project(repo, out?)` | opens the repo with its own settings; refused by a server fixed to another |
 | `overview()` | the shared system map (egress view), sizes, tier, task counts by kind and status |
 | `list_tasks(kind?, status?, limit?)` | task ids, kinds and status (`open`, `rejected`, `accepted`); under `local` also what each is about |
 | `get_task(id)` | the request: instructions, input (the payload), answer schema, and the reasons a previous answer was rejected |
@@ -999,6 +1029,15 @@ task's input already holds what its answer may use, and every extra tool is one
 more thing a small model can misuse. `check_drift` arrives with Phase 6.
 
 ### 13.4 Harness profiles
+
+The normal setup is the server added to the harness the user already has (the
+README lists the entries for Claude Code, opencode and Vibe). In that harness the
+agent usually also has file and shell tools. With privacy on, those are a way
+around it: the agent could read the source and send it to its model. The server
+cannot prevent that; it can only tell the agent not to. For a private repo with
+a cloud model, or wherever that is not good enough, `harness-init` writes a
+locked-down profile instead: archdoc's tools only, and a local profile pinned to
+one local model.
 
 `archdoc harness-init DIR --harness opencode|vibe --repo R --out O --trust local|cloud --model M`
 writes a working directory, which must not be inside the target repo. Checked
@@ -1086,6 +1125,15 @@ fixed by resubmitting with the reasons in hand, usually at the first retry; one
 behavior specification was rejected four times, each for a key the schema does not have, before it passed. Vibe compacts the
 conversation after almost every task at a 16k window, and a programmatic
 session usually ends there; the runner makes that cost a few seconds.
+
+**Bring-your-own harness** (13.2) was checked with `ollama launch claude` (Claude
+Code, archdoc as its MCP server, `HOME` pointed at a scratch directory). With
+`gemma4-12b-16k` the agent opened the repo and reported `model claude with
+gemma4-12b-16k: local (detected)`. With `nemotron-3-super:cloud` it reported
+`cloud (detected) | privacy ON`, and the overview it was given was
+pseudonymized. For `ollama launch opencode`, the server's inherited environment
+was captured and holds the model and its provider's `baseURL` in
+`OPENCODE_CONFIG_CONTENT`. Detection on that environment is unit-tested.
 
 Found while getting there:
 

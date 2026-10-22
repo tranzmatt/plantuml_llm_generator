@@ -19,13 +19,16 @@ import traceback
 from typing import Any, Callable, Dict, IO, Optional
 
 from . import __version__
-from .harness import KINDS, HarnessSession
+from .harness import KINDS, HarnessSession, open_session
+from .policy import PolicyError
 
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 
 INSTRUCTIONS = """\
 archdoc writes architecture documentation from code. You never read the code:
 each task gives you an input extracted from it and the JSON answer to write.
+0. open_project with the repository path the user gave you (unless this
+   server was started for one repository).
 1. overview: what the system is and how many tasks there are.
 2. list_tasks, then for each: get_task, write the answer from its input
    only, submit_task. A rejected answer comes back with reasons: fix it and
@@ -37,6 +40,14 @@ each task gives you an input extracted from it and the JSON answer to write.
 _ID = {"type": "string", "description": "Task id from list_tasks"}
 
 TOOLS = [
+    {"name": "open_project",
+     "description": "Open the repository to document: the path the user gave you. Its own settings decide "
+                    "what you are sent (privacy for cloud models). Call it first.",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string", "description": "Path to the repository, as the user gave it"},
+         "out": {"type": "string", "description": "Output directory (default from the repo's config, "
+                                                  "else archdoc_out in the repo)"}},
+         "required": ["repo"], "additionalProperties": False}},
     {"name": "overview",
      "description": "The system map (modules and the interfaces they provide), its size, the trust tier "
                     "and how many tasks of each kind are open, rejected or accepted. Start here.",
@@ -74,30 +85,61 @@ TOOLS = [
 
 
 class Server:
-    def __init__(self, session: HarnessSession):
-        self.session = session
+    """`session` given: the server is fixed to that repo. None: the agent opens
+    one with open_project, and `opener(repo, out)` builds it."""
+
+    def __init__(self, session: Optional[HarnessSession] = None,
+                 opener: Callable[[str, Optional[str]], HarnessSession] = open_session):
+        self.session, self.fixed, self.opener = session, session is not None, opener
         self.handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {
-            "overview": lambda a: session.overview(),
-            "list_tasks": lambda a: session.list_tasks(a.get("kind"), a.get("status") or "todo",
-                                                       int(a.get("limit") or 25)),
-            "get_task": lambda a: session.get_task(str(a["id"])),
-            "submit_task": lambda a: session.submit(str(a["id"]), a["answer"]),
-            "write_outputs": lambda a: session.write_outputs(a.get("export")),
+            "open_project": self._open,
+            "overview": lambda a: self._s().overview(),
+            "list_tasks": lambda a: self._s().list_tasks(a.get("kind"), a.get("status") or "todo",
+                                                         int(a.get("limit") or 25)),
+            "get_task": lambda a: self._s().get_task(str(a["id"])),
+            "submit_task": lambda a: self._s().submit(str(a["id"]), a["answer"]),
+            "write_outputs": lambda a: self._s().write_outputs(a.get("export")),
         }
+
+    def _s(self) -> HarnessSession:
+        if self.session is None:
+            raise KeyError("no project is open: call open_project with the repository path the user gave you")
+        return self.session
+
+    def _open(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        repo = str(args["repo"])
+        if self.fixed:
+            if os.path.abspath(os.path.expanduser(repo)) != self.session.repo:
+                raise KeyError("this server was started for one repository and cannot open another")
+        else:
+            self.session = self.opener(repo, args.get("out"))
+            print(f"archdoc: opened {self.session.repo} -> {self.session.output}; {self.session.status}",
+                  file=sys.stderr)
+        return {"opened": True, "tasks": self.session.counts() or "listed on the first list_tasks"}
 
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         handler = self.handlers.get(name)
         if handler is None:
-            return _text({"error": f"unknown tool {name!r}"}, error=True)
+            return self._text({"error": f"unknown tool {name!r}"}, error=True)
         try:
-            return _text(handler(arguments or {}))
+            return self._text(handler(arguments or {}))
         except KeyError as exc:
-            return _text({"error": exc.args[0] if exc.args else "missing argument"}, error=True)
+            return self._text({"error": exc.args[0] if exc.args else "missing argument"}, error=True)
+        except PolicyError as exc:              # the user's config: they need to see what to fix
+            return self._text({"error": f"archdoc config: {exc}"}, error=True)
         except Exception as exc:                # noqa: BLE001 - reported to the agent, details to stderr
             traceback.print_exc(file=sys.stderr)
             # the type only: a message could carry real names under the cloud tier
-            msg = str(exc) if not self.session.aliased else type(exc).__name__
-            return _text({"error": f"archdoc failed: {msg}"}, error=True)
+            hide = self.session is None or self.session.aliased
+            msg = type(exc).__name__ if hide else str(exc)
+            return self._text({"error": f"archdoc failed: {msg}"}, error=True)
+
+    def _text(self, obj: Any, error: bool = False) -> Dict[str, Any]:
+        """Every result starts with the session's status line, so what the agent
+        is sent (and why) is visible in the conversation."""
+        if isinstance(obj, dict):
+            obj = {"archdoc": self.session.status if self.session else "no project open", **obj}
+        return _text(obj, error)
 
     def handle(self, msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         method, mid, params = msg.get("method"), msg.get("id"), msg.get("params") or {}
@@ -153,11 +195,11 @@ def _text(obj: Any, error: bool = False) -> Dict[str, Any]:
             "isError": error}
 
 
-def serve_stdio(session: HarnessSession) -> None:
+def serve_stdio(server: Server) -> None:
     protocol = sys.stdout
     sys.stdout = sys.stderr                     # stray prints must never corrupt the protocol stream
     try:
-        Server(session).serve(sys.stdin, protocol)
+        server.serve(sys.stdin, protocol)
     finally:
         sys.stdout = protocol
         try:

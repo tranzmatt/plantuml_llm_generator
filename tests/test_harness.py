@@ -146,3 +146,123 @@ def test_profiles(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="inside the target repo"):
         write_profile(os.path.join(FIXTURE, "h"), "vibe", FIXTURE, "o", "local", "nemo")
+
+
+# -- bring-your-own harness: model detection, privacy, open_project ------------------
+
+@pytest.fixture
+def fake_ollama():
+    """An Ollama /api/tags with one local model and one cloud model under a plain name."""
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps({"models": [
+                {"name": "gemma:latest", "model": "gemma:latest", "size": 7},
+                {"name": "plain:latest", "model": "plain:latest", "remote_host": "https://ollama.com"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+
+
+def test_model_detection(fake_ollama):
+    from archdoc.harness_env import resolve
+    from archdoc.policy import load_config
+    cfg = load_config(None, user_config=None)
+
+    def claude(model, claimed="auto", base=fake_ollama):
+        env = {"CLAUDE_PROJECT_DIR": "/w", "ANTHROPIC_DEFAULT_OPUS_MODEL": model, "CLAUDE_CODE_SUBAGENT_MODEL": model}
+        if base:
+            env["ANTHROPIC_BASE_URL"] = base
+        return resolve(env, cfg, claimed)
+
+    assert claude("gemma").tier == "local" and claude("gemma").detected == "local"
+    assert claude("plain").tier == "cloud"                          # Ollama says it runs remotely
+    assert claude("big:cloud").tier == "cloud"                      # the name says so
+    assert claude("plain", claimed="local").tier == "cloud"         # a local claim never beats that
+    assert claude("gemma", base=None).tier == "cloud"               # Anthropic's API
+    assert claude("gemma", claimed="cloud").tier == "cloud"
+
+    v1 = {"model": "ollama/gemma:latest", "provider": {"ollama": {"options": {"baseURL": fake_ollama + "/v1"}}}}
+    v2 = {"model": {"providerID": "o", "model": "plain"}, "providers": {"o": {"settings": {"baseURL": fake_ollama}}}}
+    hosted = {"model": "mistral/mistral-large"}
+    tiers = [resolve({"OPENCODE_CONFIG_CONTENT": json.dumps(c)}, cfg).tier for c in (v1, v2, hosted)]
+    assert tiers == ["local", "cloud", "cloud"]
+
+    unknown = resolve({}, cfg, "local")                             # e.g. Vibe: only the config can say
+    assert unknown.tier == "local" and unknown.detected is None and "cannot check" in unknown.reasons[-1]
+    assert resolve({}, cfg).tier == "cloud"
+
+
+def test_privacy_settings(tmp_path):
+    from archdoc.policy import PolicyError, load_config, policy_tier
+    assert [policy_tier(m, p) for m, p in [("local", "on"), ("cloud", "on"), ("cloud", "off")]] == \
+        ["local", "cloud", "local"]
+    repo = tmp_path / "r"
+    repo.mkdir()
+    (repo / ".archdoc.toml").write_text('[privacy]\ncloud = "off"\n[harness]\nmodel = "cloud"\nout = "docs"\n')
+    cfg = load_config(str(repo), user_config=None)
+    assert (cfg.privacy_cloud, cfg.harness_model, cfg.harness_out) == ("off", "cloud", "docs")
+    user = tmp_path / "user.toml"
+    user.write_text('[privacy]\ncloud = "off"\n')
+    with pytest.raises(PolicyError, match="repo's own"):
+        load_config(str(repo), user_config=str(user))           # not for every repo at once
+    (repo / ".archdoc.toml").write_text('[harness]\nmodel = "mine"\n')
+    with pytest.raises(PolicyError, match="model must be"):
+        load_config(str(repo), user_config=None)
+
+
+def _repo_copy(tmp_path, name, settings=None):
+    import shutil
+    repo = tmp_path / name
+    shutil.copytree(FIXTURE, repo)
+    if settings:
+        (repo / ".archdoc.toml").write_text(settings)
+    return str(repo)
+
+
+def _call(server, name, **args):
+    res = server.call_tool(name, args)
+    return res["isError"], json.loads(res["content"][0]["text"])
+
+
+def test_open_project(tmp_path):
+    from archdoc.harness import open_session
+    server = Server(opener=lambda repo, out: open_session(repo, out, env={}, embed="link"))
+    err, res = _call(server, "overview")
+    assert err and "open_project" in res["error"] and res["archdoc"] == "no project open"
+
+    private = _repo_copy(tmp_path, "private")
+    err, res = _call(server, "open_project", repo=private)
+    assert not err and "privacy ON" in res["archdoc"]                # nothing configured: cloud, protected
+    err, res = _call(server, "list_tasks", limit=3)
+    assert "about" not in res["tasks"][0]
+    assert os.path.isdir(os.path.join(private, "archdoc_out"))
+
+    public = _repo_copy(tmp_path, "public", '[privacy]\ncloud = "off"\n[harness]\nout = "docs"\n')
+    err, res = _call(server, "open_project", repo=public)
+    assert "privacy OFF" in res["archdoc"]
+    err, res = _call(server, "list_tasks", kind="behavior", limit=1)
+    assert res["tasks"][0]["about"].startswith("behavior:shop.")        # real names
+    task = server.session.get_task(res["tasks"][0]["id"])
+    assert "shop" in task["input"]
+    log = [json.loads(x) for x in open(os.path.join(public, "docs", ".archdoc", "egress.jsonl"))]
+    assert {(e["tier"], e["model_tier"], e["privacy"]) for e in log} == {("local", "cloud", "off")}
+
+    err, res = _call(server, "open_project", repo=str(tmp_path / "nope"))
+    assert err and "not a directory" in res["error"]
+
+    fixed = Server(open_session(private, None, env={}))
+    err, res = _call(fixed, "open_project", repo=public)
+    assert err and "cannot open another" in res["error"]
+    assert not _call(fixed, "open_project", repo=private)[0]

@@ -30,13 +30,17 @@ from .cache import ResponseCache, request_key
 from .egress import EgressLog, Payload, build_repo_map
 from .extract import extract_python
 from .overlap import SourceIndex
+from .harness_env import ModelTier, resolve
 from .packing import Window, encode_payload
 from .plan.artifacts import PlanContext
-from .policy import load_config
+from .policy import load_config, policy_tier
 from .pseudonym import AliasMap
-from .trust import CLOUD
+from .trust import CLOUD, LOCAL
 
 DEFAULT_WINDOW = 32768           # agents run models with large windows; packing sends more source
+# what a task's input is packed for when not configured: a local model's window
+# is usually small, and it is shared with the harness's prompt and the conversation
+DEFAULT_WINDOWS = {LOCAL: 8192, CLOUD: DEFAULT_WINDOW}
 TASK_ID_LEN = 12
 KINDS = {"sequence": "sequence diagram", "activity": "activity diagram labels",
          "usecase": "use-case diagram labels", "icd": "ICD narrative", "summary": "module/package summary",
@@ -101,18 +105,26 @@ class HarnessBackend(LLMBackend):
 
 
 class HarnessSession:
-    """One repo, output directory and tier, fixed at launch."""
+    """One repo, output directory and tier, fixed when it is opened.
+
+    `trust` is the policy requests are built with. `model` says where the
+    agent's model runs and `privacy` whether this repo is protected from a cloud
+    model; with neither given, `trust` is taken as where the model runs."""
 
     def __init__(self, repo: str, output: str, trust: str = CLOUD, config: Optional[str] = None,
                  exclude: Optional[List[str]] = None, window: int = DEFAULT_WINDOW, max_entries: int = 3,
-                 template: str = "lightweight", design_template: str = "lightweight", embed: str = "svg"):
+                 template: str = "lightweight", design_template: str = "lightweight", embed: str = "svg",
+                 model: Optional[ModelTier] = None, privacy: str = "on"):
         self.repo, self.output, self.tier = os.path.abspath(repo), os.path.abspath(output), trust
+        self.model = model or ModelTier(trust, reasons=["set when the server was started"])
+        self.privacy = privacy
         self.config_path, self.exclude = config, list(exclude or [])
         self.max_entries, self.template, self.design_template, self.embed = \
             max_entries, template, design_template, embed
         state = os.path.join(self.output, ".archdoc")
         self.backend = HarnessBackend(os.path.join(state, "harness", "answers"), window)
-        self.log = EgressLog(os.path.join(state, "egress.jsonl"))
+        self.log = EgressLog(os.path.join(state, "egress.jsonl"), context={
+            "model_tier": self.model.tier, "privacy": privacy, "model": self.model.summary})
         self.alias_path = os.path.join(state, "alias_map.json")
         self.run_log = os.path.join(state, "harness", "runs.log")
         # for a runner outside the agent: is anything left, and were the outputs written since?
@@ -123,6 +135,18 @@ class HarnessSession:
     @property
     def aliased(self) -> bool:
         return self.tier == CLOUD
+
+    @property
+    def status(self) -> str:
+        """One line at the top of every tool result: what the agent's model is
+        taken to be, and so what it is sent."""
+        if self.model.tier == LOCAL:
+            sent = "real names and source, to a local model"
+        elif self.tier == CLOUD:
+            sent = "privacy ON: identifiers are aliased and no source is sent"
+        else:
+            sent = "privacy OFF for this repo: real names and source go to a cloud model"
+        return f"model {self.model.summary} | {sent}"
 
     # -- passes -----------------------------------------------------------------------
 
@@ -201,6 +225,8 @@ class HarnessSession:
         self.aliases.save(self.alias_path)
         return {
             "tier": self.tier,
+            "model": self.model.tier,
+            "privacy": self.privacy,
             "pseudonymized": self.aliased,
             "system_map": encode_payload({"system_map": repo_map}, self.config.payload_encoding),
             "size": {"modules": len(self.ir.modules), "interfaces": len(self.ir.interfaces),
@@ -266,4 +292,24 @@ class HarnessSession:
         return out
 
 
-__all__ = ["HarnessBackend", "HarnessSession", "Task", "KINDS"]
+def open_session(repo: str, output: Optional[str] = None, config: Optional[str] = None,
+                 claimed: Optional[str] = None, env: Optional[Dict[str, str]] = None,
+                 window: Optional[int] = None, **kwargs: Any) -> HarnessSession:
+    """A session for `repo` with its own settings: where the agent's model runs
+    (detected from the harness's environment, else `claimed`, else the config's
+    [harness] model, else cloud) and the repo's [privacy]. Privacy never comes
+    from the agent: only from the repo's config or an explicit --config file."""
+    repo = os.path.abspath(os.path.expanduser(repo))
+    if not os.path.isdir(repo):
+        raise KeyError(f"{repo!r} is not a directory")
+    cfg = load_config(repo, extra=config)
+    model = resolve(os.environ if env is None else env, cfg, claimed or cfg.harness_model)
+    tier = policy_tier(model.tier, cfg.privacy_cloud)
+    if not output:
+        output = cfg.harness_out or "archdoc_out"
+    output = os.path.join(repo, os.path.expanduser(output))      # relative: to the repo
+    return HarnessSession(repo, output, trust=tier, config=config, model=model, privacy=cfg.privacy_cloud,
+                          window=window or cfg.harness_window or DEFAULT_WINDOWS[model.tier], **kwargs)
+
+
+__all__ = ["HarnessBackend", "HarnessSession", "Task", "KINDS", "open_session"]

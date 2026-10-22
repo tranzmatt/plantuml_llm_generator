@@ -98,6 +98,15 @@ class Config:
     # [overlap]: verbatim-overlap guard on model-written text (DESIGN.md 2.5)
     overlap_mode: str = "reject"
     overlap_min_words: int = 8
+    # [privacy] cloud: "on" pseudonymizes what a cloud model is sent (the cloud
+    # policy); "off" sends a cloud model what a local one gets, for code that
+    # needs no protecting. Only a repo's own config (or --config) can turn it off.
+    privacy_cloud: str = "on"
+    # [harness]: where a coding agent's model runs when archdoc cannot tell
+    # (auto: find out, else cloud), and the session's output dir and window
+    harness_model: str = "auto"
+    harness_out: Optional[str] = None
+    harness_window: Optional[int] = None
     sources: List[str] = field(default_factory=list)   # config files that were read
 
     def policy_for(self, tier: str) -> EgressPolicy:
@@ -137,7 +146,9 @@ def stricter(a: EgressPolicy, b: EgressPolicy) -> EgressPolicy:
 # Loading
 # ---------------------------------------------------------------------------
 
-_TOP_KEYS = {"policy", "paths", "secrets", "trust", "backends", "llm", "overlap"}
+_TOP_KEYS = {"policy", "paths", "secrets", "trust", "backends", "llm", "overlap", "privacy", "harness"}
+PRIVACY = ("on", "off")
+HARNESS_MODELS = ("auto", "local", "cloud")
 
 
 def _read_toml(path: str) -> Dict[str, Any]:
@@ -177,7 +188,12 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
     sources: List[str] = []
     for p in paths:
         if os.path.isfile(p):
-            data = _merge(data, _read_toml(p))
+            part = _read_toml(p)
+            if p == user_config and part.get("privacy", {}).get("cloud") == "off":
+                # one switch for every repo is too easy to forget about
+                raise PolicyError(f"{p}: [privacy] cloud = \"off\" belongs in the repo's own {REPO_CONFIG}, "
+                                  "not the user config")
+            data = _merge(data, part)
             sources.append(p)
         elif p == extra:
             raise PolicyError(f"config file not found: {p}")
@@ -232,4 +248,28 @@ def load_config(repo_root: Optional[str] = None, user_config: Optional[str] = US
     cfg.overlap_min_words = int(ov.get("min_words", 8))
     if cfg.overlap_min_words < 4:
         raise PolicyError(f"{src}: [overlap] min_words below 4 would flag ordinary phrases")
+
+    pv = data.get("privacy", {})
+    unknown = set(pv) - {"cloud"}
+    if unknown:
+        raise PolicyError(f"{src}: [privacy] unknown key(s) {', '.join(sorted(unknown))}")
+    cfg.privacy_cloud = pv.get("cloud", "on")
+    if cfg.privacy_cloud not in PRIVACY:
+        raise PolicyError(f"{src}: [privacy] cloud must be 'on' or 'off'")
+
+    hs = data.get("harness", {})
+    unknown = set(hs) - {"model", "out", "window"}
+    if unknown:
+        raise PolicyError(f"{src}: [harness] unknown key(s) {', '.join(sorted(unknown))}")
+    cfg.harness_model = hs.get("model", "auto")
+    if cfg.harness_model not in HARNESS_MODELS:
+        raise PolicyError(f"{src}: [harness] model must be one of {', '.join(HARNESS_MODELS)}")
+    cfg.harness_out = hs.get("out")
+    cfg.harness_window = int(hs["window"]) if "window" in hs else None
     return cfg
+
+
+def policy_tier(model_tier: str, privacy: str) -> str:
+    """The policy a request is built with: a cloud model gets the cloud policy
+    unless privacy is off for this repo."""
+    return LOCAL if model_tier == LOCAL or privacy == "off" else CLOUD

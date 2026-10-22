@@ -959,9 +959,12 @@ def build_payload(
 class EgressLog:
     """Append-only JSONL record of everything sent (<out>/.archdoc/egress.jsonl)."""
 
-    def __init__(self, path: str, include_payload: bool = True):
+    def __init__(self, path: str, include_payload: bool = True, context: Optional[Dict[str, Any]] = None):
         self.path = path
         self.include_payload = include_payload
+        # recorded with every entry: where the model runs and whether privacy was on,
+        # which `tier` (the policy the payload was built with) alone does not say
+        self.context = dict(context or {})
 
     def record(self, payload: Payload, backend: str, url: Optional[str], **extra: Any) -> None:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -974,6 +977,7 @@ class EgressLog:
             "sha256": payload.sha256,
             "tokens_est": payload.token_estimate,
             "redactions": len(payload.redactions),
+            **self.context,
             **extra,
         }
         if self.include_payload:

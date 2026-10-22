@@ -97,26 +97,67 @@ start small. Model answers are cached in `archdoc_out/.archdoc/cache/`: a rerun
 with no code change sends nothing, and after a change only the affected
 requests are sent again (`--no-cache` to ask again anyway).
 
-**Coding agents (opencode, Mistral Vibe).** The agent can act as the model.
-`archdoc serve-mcp` is an MCP server that hands it the exact requests a model
-would get (pseudonymized under `--trust cloud`) and checks its answers the same
-way. The agent never reads the repo:
+**Coding agents (Claude Code, opencode, Mistral Vibe, ...).** The agent can act as
+the model. `archdoc serve-mcp` is an MCP server that hands it the exact requests a
+model would get and checks its answers the same way. Add it to your harness once
+(`archdoc` must be on PATH, e.g. `pip install -e .`):
 
 ```bash
-archdoc harness-init ~/archdoc-agent --harness opencode --repo ~/Code/YourProject \
-  --out ~/archdoc_out --trust local --model MODEL     # or --harness vibe
-~/archdoc-agent/run-opencode.sh                               # headless, or run-vibe.sh
+claude mcp add --scope user archdoc -- archdoc serve-mcp          # Claude Code
 ```
 
-The directory gets `AGENTS.md` and a profile in which archdoc's five tools are
-the only tools: no file, shell or web access. A `local` profile can use only
-its one local model (Ollama's `/v1` by default, `--url` otherwise; give the
-model a 16k window or more, e.g. an Ollama variant with `num_ctx 16384`, and
-pass `--context` if it differs). A `cloud` profile uses the harness's own
-provider setup (opencode: `--model provider/model`), and the agent sees only aliases. Set
-`PLANTUML_JAR` before `harness-init` to have diagrams checked and rendered.
-Answers are kept in the output directory, so a stopped run resumes, and after
-a code change only the affected requests come back. See DESIGN.md §13.
+```jsonc
+// opencode: ~/.config/opencode/opencode.json
+{ "mcp": { "servers": { "archdoc": { "type": "local", "command": ["archdoc", "serve-mcp"],
+                                     "codemode": false } } } }   // the tools themselves, not a JS sandbox
+```
+
+```toml
+# Mistral Vibe: ~/.vibe/config.toml
+[[mcp_servers]]
+name = "archdoc"
+transport = "stdio"
+command = ["archdoc", "serve-mcp"]
+tool_timeout_sec = 900
+```
+
+Then ask: *"Document ~/Code/YourProject with archdoc."* The agent opens the repo
+with `open_project` and works through the tasks. It works the same under
+`ollama launch claude --model ...` or `ollama launch opencode --model ...`.
+
+What the agent is sent depends on two things, both shown at the top of every
+archdoc tool result:
+
+- **Where its model runs.** Detected under `ollama launch` (Claude Code and
+  opencode): Ollama says whether a model runs locally or on its cloud, so a
+  `:cloud` model is cloud even when it is served from localhost. Where it can't
+  be detected (Vibe, other providers), the model counts as cloud unless you set
+  `[harness] model = "local"`. That setting is your word for it; a model detected
+  as cloud stays cloud.
+- **Privacy, per repo.** With a cloud model, privacy is on unless the repo says
+  otherwise. On means identifiers are aliased and no source is sent. For code you
+  don't need to protect, put this in the repo's `.archdoc.toml`:
+
+```toml
+[privacy]
+cloud = "off"        # a cloud model gets real names and source, as a local one does
+[harness]
+out = "docs/archdoc" # optional, relative to the repo; default archdoc_out
+```
+
+Privacy can only be turned off in the repo's own `.archdoc.toml` (or a `--config`
+file), never in your user config or by the agent. The CLI has the same switch:
+`--privacy on|off`. Detection happens once, when the harness starts the server,
+so a model switched mid-session isn't seen.
+
+Your harness also gives the agent file and shell tools, which it is told not to
+use on the repo. If that is not enough (a private repo with a cloud model),
+`archdoc harness-init DIR --harness opencode|vibe --repo R --out O --trust
+local|cloud --model M` writes a locked-down working directory: archdoc's tools
+only, a local profile pinned to its one local model, and `run-<harness>.sh` for
+headless runs. Answers are kept in the output directory, so a stopped run
+resumes, and after a code change only the affected requests come back. Set
+`PLANTUML_JAR` to have diagrams checked and rendered. See DESIGN.md §13.
 
 `archdoc eval REPO --spec eval/<name>.toml --backend a,b,c` compares the
 extracted architecture with a reference diagram and the backends with each other
