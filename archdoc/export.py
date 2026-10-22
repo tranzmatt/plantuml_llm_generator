@@ -36,11 +36,23 @@ def render_images(puml_paths: List[str], fmt: str = "svg", timeout: int = 600) -
     out = {}
     for p in puml_paths:
         img = p[: -len(".puml")] + f".{fmt}"
+        # PlantUML names the image after `@startuml <name>`, not the file
+        named = _startuml_name(p)
+        if named:
+            src = os.path.join(os.path.dirname(p), f"{named}.{fmt}")
+            if src != img and os.path.exists(src):
+                os.replace(src, img)
         if os.path.exists(img) and os.path.getmtime(img) >= os.path.getmtime(p) - 1:
             out[p] = img
     if proc.returncode and not out:
         raise RuntimeError(f"PlantUML failed: {proc.stderr.strip()[:300]}")
     return out
+
+
+def _startuml_name(puml_path: str) -> Optional[str]:
+    with open(puml_path, encoding="utf-8") as fh:
+        m = re.match(r"@startuml[ \t]+(\S+)", fh.readline())
+    return m.group(1) if m else None
 
 
 def figures(diagrams: List[Dict[str, object]], doc_dir: str, mode: str,

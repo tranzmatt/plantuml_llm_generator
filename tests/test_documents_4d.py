@@ -110,3 +110,16 @@ def test_cli_embeds_rendered_svg(tmp_path):
     icd = (out / "icd" / "sample_app_icd.md").read_text()
     imgs = re.findall(r"!\[[^\]]*\]\((\.\./diagrams/[^)]+\.svg)\)", icd)
     assert imgs and all((out / "icd" / p).resolve().exists() for p in imgs)
+
+
+@pytest.mark.skipif(plantuml_command() is None, reason="PlantUML not available")
+def test_rendered_svg_for_a_hyphenated_repo_name(tmp_path):
+    # PlantUML names the image after `@startuml <name>`, which has no hyphens
+    import shutil
+    repo = tmp_path / "sample-app"
+    shutil.copytree(FIXTURE, repo)
+    out = tmp_path / "out"
+    assert cli.main(["all", str(repo), "-o", str(out), "--no-date", "--embed", "svg"]) == 0
+    pumls = sorted((out / "diagrams").glob("*.puml"))
+    assert pumls and all(p.with_suffix(".svg").exists() for p in pumls)
+    assert not list((out / "diagrams").glob("sample_app_*.svg"))
